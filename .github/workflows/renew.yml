@@ -103,7 +103,7 @@ jobs:
 
           def domain_line(d):
               """返回 (图标, 域名, 后缀说明)，TG / 微信共用。"""
-              icon = {"renewed": "✅", "skipped": "⚪", "failed": "❌"}.get(d.get("result"), "❓")
+              icon = {"renewed": "✅", "skipped": "⚪", "failed": "🔴"}.get(d.get("result"), "❓")
               name = d.get("name") or ""
               days = d.get("remaining_days")
               if d.get("result") == "renewed":
@@ -124,18 +124,18 @@ jobs:
               "",
           ]
           if status == "error" and top_error:
-              tg_lines.append(f"❌ 脚本运行失败：{html.escape(clean(top_error))}")
+              tg_lines.append(f"🔴 脚本运行失败：{html.escape(clean(top_error))}")
           tg_lines.append(
               f"✅ 续期 {summary.get('renewed', 0)} · "
               f"⚪ 跳过 {summary.get('skipped', 0)} · "
-              f"❌ 失败 {summary.get('failed', 0)} · "
+              f"🔴 失败 {summary.get('failed', 0)} · "
               f"共 {summary.get('domains', 0)} 个域名 / {summary.get('accounts', 0)} 个账号"
           )
           for a in accounts:
               tg_lines.append("")
               tg_lines.append(f"<b>{a.get('index', '')}. {html.escape(a.get('email') or '')}</b>")
               if a.get("status") in ("no_key", "error"):
-                  tg_lines.append(f"  ❌ {html.escape(clean(a.get('error'), 100))}")
+                  tg_lines.append(f"  🔴 {html.escape(clean(a.get('error'), 100))}")
               elif not a.get("domains"):
                   tg_lines.append("  — 无域名")
               else:
@@ -157,18 +157,18 @@ jobs:
               "",
           ]
           if status == "error" and top_error:
-              wx_lines.append(f"❌ 脚本运行失败：{clean(top_error)}")
+              wx_lines.append(f"🔴 脚本运行失败：{clean(top_error)}")
           wx_lines.append(
-              f"✅ 续期 {summary.get('renewed', 0)} · "
+              f"🟢 续期 {summary.get('renewed', 0)} · "
               f"⚪ 跳过 {summary.get('skipped', 0)} · "
-              f"❌ 失败 {summary.get('failed', 0)} · "
+              f"🔴 失败 {summary.get('failed', 0)} · "
               f"共 {summary.get('domains', 0)} 个域名 / {summary.get('accounts', 0)} 个账号"
           )
           for a in accounts:
               wx_lines.append("")
               wx_lines.append(f"{a.get('index', '')}. {a.get('email') or ''}")
               if a.get("status") in ("no_key", "error"):
-                  wx_lines.append(f"  ❌ {clean(a.get('error'), 100)}")
+                  wx_lines.append(f"  🔴 {clean(a.get('error'), 100)}")
               elif not a.get("domains"):
                   wx_lines.append("  — 无域名")
               else:
