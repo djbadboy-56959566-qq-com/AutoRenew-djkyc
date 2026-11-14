@@ -118,7 +118,7 @@ jobs:
 
           # ---- TG 版：HTML ----
           tg_lines = [
-              "<b>🔔 DigitalPlat 域名续期</b>",
+              "<b>🔔 DigitalPlat 域名自动续期</b>",
               f"👤 {html.escape(OWNER)} · 📁 {html.escape(REPO_NAME)}",
               f"🕐 {NOW}",
               "",
@@ -126,7 +126,7 @@ jobs:
           if status == "error" and top_error:
               tg_lines.append(f"🔴 脚本运行失败：{html.escape(clean(top_error))}")
           tg_lines.append(
-              f"✅ 续期 {summary.get('renewed', 0)} · "
+              f"🟢续期 {summary.get('renewed', 0)} · "
               f"⚪ 跳过 {summary.get('skipped', 0)} · "
               f"🔴 失败 {summary.get('failed', 0)} · "
               f"共 {summary.get('domains', 0)} 个域名 / {summary.get('accounts', 0)} 个账号"
