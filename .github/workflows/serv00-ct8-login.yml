@@ -34,8 +34,11 @@ jobs:
       - name: Send Notification
         if: always()
         env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # 注意：这个仓库里已有的 Secret 名是 TG_BOT_TOKEN / TG_CHAT_ID，
+          # 不是 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID，
+          # 用错名字读出来是空的，就会报“Telegram 未配置，跳过”。
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           WX_PUSH_URL: ${{ secrets.WX_PUSH_URL }}
           WX_PUSH_TOKEN: ${{ secrets.WX_PUSH_TOKEN }}
         run: |
@@ -85,8 +88,8 @@ jobs:
           ])
 
           # ---- 发送 TG ----
-          tg_token = os.getenv("TELEGRAM_BOT_TOKEN")
-          tg_chat = os.getenv("TELEGRAM_CHAT_ID")
+          tg_token = os.getenv("TG_BOT_TOKEN")
+          tg_chat = os.getenv("TG_CHAT_ID")
           if tg_token and tg_chat:
               try:
                   req = urllib.request.Request(
@@ -102,15 +105,18 @@ jobs:
           else:
               print("Telegram 未配置，跳过。")
 
-          # ---- 发送微信（自建 WXPush；token 只放 Authorization 头，不放 body）----
+          # ---- 发送微信（自建 WXPush；payload 格式跟 DigitalPlat 续期
+          # 那个能正常收到的工作流保持一致：body 里带 token，
+          # Authorization 头是 Bearer + token。别只发 raw token，
+          # 这个地址上只发 raw token 会报 403。----
           wx_url = os.getenv("WX_PUSH_URL")
           wx_token = os.getenv("WX_PUSH_TOKEN")
           if wx_url and wx_token:
               try:
                   req = urllib.request.Request(
                       wx_url,
-                      data=json.dumps({"title": "Serv00 & CT8 自动登录保号", "content": wx_text}).encode(),
-                      headers={"Authorization": wx_token, "Content-Type": "application/json"},
+                      data=json.dumps({"token": wx_token, "title": "Serv00 & CT8 自动登录保号", "content": wx_text}).encode(),
+                      headers={"Authorization": f"Bearer {wx_token}", "Content-Type": "application/json"},
                       method="POST",
                   )
                   with urllib.request.urlopen(req, timeout=15) as resp:
