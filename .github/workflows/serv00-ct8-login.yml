@@ -19,7 +19,7 @@ jobs:
       - name: Run Login Script
         env:
           ACCOUNTS_JSON: ${{ secrets.ACCOUNTS_JSON }}
-        run: python3 DigitalPlat/serv00-ct8/login.py
+        run: python3 serv00-ct8/login.py
 
       # 消息样式都在这一步里，不在脚本里。
       # 脚本只把结果写到 login_result.json，这里拼表头、链接再发 Telegram。
