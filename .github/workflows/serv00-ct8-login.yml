@@ -1,0 +1,72 @@
+name: Serv00 & CT8 Auto Login
+
+on:
+  schedule:
+    # 每月 1 号 00:00 UTC = 北京时间 08:00，90 天保活，每月一次就够了
+    - cron: '0 0 1 * *'
+  workflow_dispatch: # 支持手动触发
+
+jobs:
+  login:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # 精简版：纯 Python 标准库，不用装 Chrome、不用 pip install
+      # login.py 放在仓库的 DigitalPlat/serv00-ct8/ 文件夹里，
+      # 不在仓库根目录，所以这里要带上完整路径
+      - name: Run Login Script
+        env:
+          ACCOUNTS_JSON: ${{ secrets.ACCOUNTS_JSON }}
+        run: python3 DigitalPlat/serv00-ct8/login.py
+
+      # 消息样式都在这一步里，不在脚本里。
+      # 脚本只把结果写到 login_result.json，这里拼表头、链接再发 Telegram。
+      - name: Send Telegram Notification
+        if: always()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python3 - << 'PY'
+          import json, os, urllib.request
+
+          token = os.getenv("TELEGRAM_BOT_TOKEN")
+          chat_id = os.getenv("TELEGRAM_CHAT_ID")
+          if not token or not chat_id:
+              print("未设置 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID，跳过通知")
+              raise SystemExit(0)
+
+          try:
+              with open("DigitalPlat/serv00-ct8/login_result.json", encoding="utf-8") as f:
+                  results = json.load(f)
+          except Exception:
+              results = [{"provider": "?", "username": "?", "panel": "",
+                          "ok": False, "message": "脚本没有产出结果文件，请看 Actions 日志"}]
+
+          # 表头：用户名和项目名从 GITHUB_REPOSITORY 自动取
+          repo = os.getenv("GITHUB_REPOSITORY", "你的用户名/你的仓库名")
+          owner, _, name = repo.partition("/")
+          lines = [
+              f"👤 {owner} · 📁 {name}",
+              '🌐 Serv00 平台：<a href="https://www.serv00.com/">请点击</a>',
+              '🌐 CT8 平台：<a href="https://www.ct8.pl/">请点击</a>',
+              f'🔗 仓库：<a href="https://github.com/{repo}/">请点击</a>',
+          ]
+          for r in results:
+              icon = "✅" if r.get("ok") else "❌"
+              lines.append(f"{icon} {r.get('provider')} {r.get('username')}：{r.get('message')}")
+          ok = sum(1 for r in results if r.get("ok"))
+          lines.append(f"完成：{ok}/{len(results)} 个账号登录成功")
+
+          text = "\n".join(lines)
+          req = urllib.request.Request(
+              f"https://api.telegram.org/bot{token}/sendMessage",
+              data=json.dumps({"chat_id": chat_id, "text": text, "parse_mode": "HTML"}).encode(),
+              headers={"Content-Type": "application/json"},
+              method="POST",
+          )
+          urllib.request.urlopen(req, timeout=15)
+          print("Telegram 通知已发送")
+          PY
