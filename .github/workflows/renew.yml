@@ -28,7 +28,7 @@ jobs:
           DP_API_KEY: ${{ secrets.DP_API_KEY }}
           DP_ACCOUNT_EMAILS: ${{ secrets.DP_ACCOUNT_EMAILS }}
         run: |
-          python renew.py
+          python DigitalPlat/renew.py
 
       # ============================================================
       # 通知模板（TG + 微信）都在这里，改推送样式只改这一段，
