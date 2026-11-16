@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""FurryBox 每日签到 — 修正版 v3 多账号 (2026-11-16)
+"""FurryBox 每日签到 — 修正版 v3.1 多账号 (2026-11-16)
 
 为什么不用 Gemini 那版 (Playwright + FURRYBOX_COOKIE):
   1. FurryBox 登录根本不靠 Cookie。会话存在 localStorage `fbx-session`
@@ -20,16 +20,17 @@
      这算成功，不是失败。
 
 多账号:
-  一个账号一个 refresh_token，逐个签到，一个失败不影响其他账号。
-  填法二选一:
-  A) 一个 Secret 里放多个，用换行或逗号分隔:
-       FURRYBOX_REFRESH_TOKEN = <账号1的token>
-                                 <账号2的token>
-  B) 分开建多个 Secret:
-       FURRYBOX_REFRESH_TOKEN, FURRYBOX_REFRESH_TOKEN_2,
-       FURRYBOX_REFRESH_TOKEN_3, ... (到 _10)
-  两种可以混用，脚本会去重。每个账号都要在浏览器里单独登录一次
-  再取 token(切换账号登录，或换浏览器/无痕窗口)，不要把同一个
+  一个账号一个 refresh_token，一个 Secret 只放一个 token，
+  不要把多个 token 挤在一个 Secret 里(换行/逗号分隔也不行)，
+  GitHub 一个名字也只能建一个 Secret。
+  多账号就分开建多个 Secret:
+       FURRYBOX_REFRESH_TOKEN    = 账号1的 token
+       FURRYBOX_REFRESH_TOKEN_2  = 账号2的 token
+       FURRYBOX_REFRESH_TOKEN_3  = 账号3的 token
+       ... (到 _10)
+  脚本逐个签到，一个失败不影响其他账号。
+  每个账号都要在浏览器里单独登录一次再取 token
+  (切换账号登录，或换浏览器/无痕窗口)，不要把同一个
   token 贴两遍——那是同一个账号，只会签一次。
 
   注意(实测 2026-11-16): refresh_token 只有 12 个字符，但能正常换
@@ -51,7 +52,6 @@
 import base64
 import json
 import os
-import re
 import sys
 import urllib.request
 import urllib.error
@@ -103,17 +103,18 @@ def post_json(url, payload, headers=None, timeout=30):
         raise RuntimeError(f"请求失败 {url}: {e}")
 
 
-def split_tokens(value):
-    return [t for t in re.split(r"[\s,;]+", value or "") if t]
-
-
 def get_refresh_tokens():
-    """收集全部 refresh_token，去重，不打印、不记录它们的值。"""
+    """收集全部 refresh_token，一个 Secret 就是一个 token，不拆分，
+    去重，不打印、不记录它们的值。"""
     tokens = []
-    for name in ["FURRYBOX_REFRESH_TOKEN", "FURRYBOX_REFRESH_TOKENS"]:
-        tokens += split_tokens(os.getenv(name, ""))
-    for i in range(2, 11):
-        tokens += split_tokens(os.getenv(f"FURRYBOX_REFRESH_TOKEN_{i}", ""))
+    # 主 Secret + _2.._10，每个只取整个值 strip 后当一个 token
+    names = ["FURRYBOX_REFRESH_TOKEN"] + [
+        f"FURRYBOX_REFRESH_TOKEN_{i}" for i in range(2, 11)
+    ]
+    for name in names:
+        value = os.getenv(name, "").strip()
+        if value:
+            tokens.append(value)
     session = os.getenv("FURRYBOX_SESSION", "").strip()
     if session:
         try:
@@ -230,7 +231,7 @@ def main():
             "缺少凭证: 请在 Secrets 里设置 FURRYBOX_REFRESH_TOKEN\n"
             "取法: 登录 https://my.furry.box/wallet 后 F12 Console 执行\n"
             "  copy(JSON.parse(localStorage.getItem('fbx-session')).refresh_token)\n"
-            "多账号: 同一个 Secret 里换行/逗号放多个 token，或再建 "
+            "多账号: 一个 Secret 一个 token，再建 "
             "FURRYBOX_REFRESH_TOKEN_2、_3……"
         )
     log(f"共 {len(tokens)} 个账号，开始签到...")

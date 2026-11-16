@@ -173,29 +173,21 @@ Actions → 左边点 FurryBox Auto Checkin → Run workflow → Run workflow，
 
 ## 5. 多账号
 
-可以。一个账号一个 `refresh_token`，脚本逐个签到，
-一个失败不影响其他账号，日志里按邮箱区分账号。
+可以。一个账号一个 `refresh_token`，一个 Secret 只放一个 token，
+不要把多个 token 挤在一个 Secret 里（换行/逗号分隔也不行），
+GitHub 一个名字也只能建一个 Secret。
 
-填法二选一：
-
-**A) 一个 Secret 里放多个，换行或逗号分隔：**
-
-```
-FURRYBOX_REFRESH_TOKEN = <账号1的token>
-                         <账号2的token>
-```
-
-**B) 分开建多个 Secret：**
+多账号就分开建多个 Secret：
 
 ```
-FURRYBOX_REFRESH_TOKEN
-FURRYBOX_REFRESH_TOKEN_2
-FURRYBOX_REFRESH_TOKEN_3
+FURRYBOX_REFRESH_TOKEN    = 账号1的 token
+FURRYBOX_REFRESH_TOKEN_2  = 账号2的 token
+FURRYBOX_REFRESH_TOKEN_3  = 账号3的 token
 ……
 （到 _10）
 ```
 
-两种可以混用，脚本会去重。
+脚本逐个签到，一个失败不影响其他账号，日志里按邮箱区分账号。
 
 每个账号都要在浏览器里单独登录一次再取 token
 （切换账号登录，或换浏览器 / 无痕窗口），
@@ -271,7 +263,9 @@ Secret 里那个只能用一次，需要加一个“跑完自动把新 token 回
 - 2026-11-16 v2：改成纯标准库直接调 Supabase 签到接口，
   用 `refresh_token` 换 `access_token`，查余额、已签到判成功。
   部署位置定为 `DigitalPlat-renew-djkyc` 仓库的 `furrybox/` 文件夹。
-- 2026-11-16 v3：多账号版。一个 Secret 里多行/逗号分隔多个 token，
-  或 `FURRYBOX_REFRESH_TOKEN_2`……`_10`，逐个签到、逐个汇报。
-  实测：单账号手动运行 #3 成功；`refresh_token` 12 位有效，
-  手动换 token 测试会作废旧 token。
+- 2026-11-16 v3：多账号版。`FURRYBOX_REFRESH_TOKEN_2`……`_10`，
+  逐个签到、逐个汇报。实测：单账号手动运行 #3 成功；
+  `refresh_token` 12 位有效，手动换 token 测试会作废旧 token。
+- 2026-11-16 v3.1：多账号改成一个 Secret 一个 token，
+  不再支持一个 Secret 里换行/逗号挤多个 token，
+  GitHub 一个名字只能建一个 Secret。
