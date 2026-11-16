@@ -19,24 +19,28 @@ jobs:
       - name: Run Login Script
         env:
           ACCOUNTS_JSON: ${{ secrets.ACCOUNTS_JSON }}
-        run: python3 serv00-ct8/login.py
+        run: python3 DigitalPlat/serv00-ct8/login.py
 
+      # ============================================================
       # 消息样式都在这一步里，不在脚本里。
-      # 脚本只把结果写到 login_result.json，这里拼表头、链接再发 Telegram。
-      - name: Send Telegram Notification
+      # 脚本只把结果写到 DigitalPlat/serv00-ct8/login_result.json，
+      # 这里读结果，拼 TG + 微信两份消息再发。
+      # 规则（跟 DigitalPlat 续期那套一样）：
+      #   - TG 用 HTML：<a href> 可点链接，显示成“请点击”
+      #   - 微信用纯文本：微信模板消息不认 HTML 标签，
+      #     地址单独放一行，点开 / 复制都方便
+      #   - 两份消息共用同一份 login_result.json，只是渲染方式不同
+      # ============================================================
+      - name: Send Notification
         if: always()
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          WX_PUSH_URL: ${{ secrets.WX_PUSH_URL }}
+          WX_PUSH_TOKEN: ${{ secrets.WX_PUSH_TOKEN }}
         run: |
           python3 - << 'PY'
           import json, os, urllib.request
-
-          token = os.getenv("TELEGRAM_BOT_TOKEN")
-          chat_id = os.getenv("TELEGRAM_CHAT_ID")
-          if not token or not chat_id:
-              print("未设置 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID，跳过通知")
-              raise SystemExit(0)
 
           try:
               with open("DigitalPlat/serv00-ct8/login_result.json", encoding="utf-8") as f:
@@ -48,25 +52,71 @@ jobs:
           # 表头：用户名和项目名从 GITHUB_REPOSITORY 自动取
           repo = os.getenv("GITHUB_REPOSITORY", "你的用户名/你的仓库名")
           owner, _, name = repo.partition("/")
-          lines = [
+          repo_url = f"https://github.com/{repo}/"
+          ok = sum(1 for r in results if r.get("ok"))
+          result_lines = []
+          for r in results:
+              icon = "✅" if r.get("ok") else "❌"
+              result_lines.append(f"{icon} {r.get('provider')} {r.get('username')}：{r.get('message')}")
+          summary = f"完成：{ok}/{len(results)} 个账号登录成功"
+
+          # ---- TG 版：HTML ----
+          tg_text = "\n".join([
               f"👤 {owner} · 📁 {name}",
               '🌐 Serv00 平台：<a href="https://www.serv00.com/">请点击</a>',
               '🌐 CT8 平台：<a href="https://www.ct8.pl/">请点击</a>',
-              f'🔗 仓库：<a href="https://github.com/{repo}/">请点击</a>',
-          ]
-          for r in results:
-              icon = "✅" if r.get("ok") else "❌"
-              lines.append(f"{icon} {r.get('provider')} {r.get('username')}：{r.get('message')}")
-          ok = sum(1 for r in results if r.get("ok"))
-          lines.append(f"完成：{ok}/{len(results)} 个账号登录成功")
+              f'🔗 仓库：<a href="{repo_url}">请点击</a>',
+              *result_lines,
+              summary,
+          ])
 
-          text = "\n".join(lines)
-          req = urllib.request.Request(
-              f"https://api.telegram.org/bot{token}/sendMessage",
-              data=json.dumps({"chat_id": chat_id, "text": text, "parse_mode": "HTML"}).encode(),
-              headers={"Content-Type": "application/json"},
-              method="POST",
-          )
-          urllib.request.urlopen(req, timeout=15)
-          print("Telegram 通知已发送")
+          # ---- 微信版：纯文本，一个 HTML 标签都没有 ----
+          wx_text = "\n".join([
+              "Serv00 & CT8 自动登录保号",
+              f"👤 {owner} · 📁 {name}",
+              "🌐 Serv00 平台：",
+              "https://www.serv00.com/",
+              "🌐 CT8 平台：",
+              "https://www.ct8.pl/",
+              "🔗 仓库：",
+              repo_url,
+              *result_lines,
+              summary,
+          ])
+
+          # ---- 发送 TG ----
+          tg_token = os.getenv("TELEGRAM_BOT_TOKEN")
+          tg_chat = os.getenv("TELEGRAM_CHAT_ID")
+          if tg_token and tg_chat:
+              try:
+                  req = urllib.request.Request(
+                      f"https://api.telegram.org/bot{tg_token}/sendMessage",
+                      data=json.dumps({"chat_id": tg_chat, "text": tg_text, "parse_mode": "HTML"}).encode(),
+                      headers={"Content-Type": "application/json"},
+                      method="POST",
+                  )
+                  urllib.request.urlopen(req, timeout=15)
+                  print("Telegram 通知已发送")
+              except Exception as e:
+                  print(f"Telegram 通知异常: {e}")
+          else:
+              print("Telegram 未配置，跳过。")
+
+          # ---- 发送微信（自建 WXPush；token 只放 Authorization 头，不放 body）----
+          wx_url = os.getenv("WX_PUSH_URL")
+          wx_token = os.getenv("WX_PUSH_TOKEN")
+          if wx_url and wx_token:
+              try:
+                  req = urllib.request.Request(
+                      wx_url,
+                      data=json.dumps({"title": "Serv00 & CT8 自动登录保号", "content": wx_text}).encode(),
+                      headers={"Authorization": wx_token, "Content-Type": "application/json"},
+                      method="POST",
+                  )
+                  with urllib.request.urlopen(req, timeout=15) as resp:
+                      print(f"微信: {resp.status} {resp.read()[:300]}")
+              except Exception as e:
+                  print(f"微信通知异常: {e}")
+          else:
+              print("微信未配置，跳过。")
           PY
