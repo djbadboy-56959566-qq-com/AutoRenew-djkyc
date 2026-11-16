@@ -23,9 +23,56 @@ jobs:
           # 旧的 refresh_token 方式(回退用，会轮换作废，不推荐)
           FURRYBOX_REFRESH_TOKEN: ${{ secrets.FURRYBOX_REFRESH_TOKEN }}
           FURRYBOX_REFRESH_TOKEN_2: ${{ secrets.FURRYBOX_REFRESH_TOKEN_2 }}
-          # 可选: 失败/成功推 Telegram，不设就不推
-          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
-          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         # checkin.py 放在 DigitalPlat-renew-djkyc 仓库的 furrybox/ 文件夹里，
         # 不在仓库根目录，所以这里要带上 furrybox/ 路径
+        # 脚本本身不发通知，只把结果行写到 furrybox/checkin_result.txt
         run: python3 furrybox/checkin.py
+
+      # 消息样式都在这一步里，不在脚本里。
+      # 脚本只给结果行，这里拼表头、链接再发 Telegram。
+      # 签到成功 / 已签过 / 失败都是同一条通知，表头只出现一次。
+      - name: Send Telegram Notification
+        if: always()
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        run: |
+          python3 - << 'PY'
+          import json, os, urllib.request
+
+          token = os.getenv("TG_BOT_TOKEN")
+          chat_id = os.getenv("TG_CHAT_ID")
+          if not token or not chat_id:
+              print("未设置 TG_BOT_TOKEN / TG_CHAT_ID，跳过通知")
+              raise SystemExit(0)
+
+          # 结果行：脚本写的 furrybox/checkin_result.txt，每行一个账号
+          try:
+              with open("furrybox/checkin_result.txt", encoding="utf-8") as f:
+                  lines = [l.rstrip("\n") for l in f if l.strip()]
+          except FileNotFoundError:
+              lines = ["❌ 脚本没有产出结果文件，请看 Actions 日志"]
+          if not lines:
+              lines = ["❌ 脚本没有产出结果，请看 Actions 日志"]
+
+          # 表头：用户名和项目名从 GITHUB_REPOSITORY 自动取
+          # 例如 djbadboy-56959566-qq-com/DigitalPlat-renew-djkyc
+          repo = os.getenv("GITHUB_REPOSITORY", "djbadboy-56959566-qq-com/DigitalPlat-renew-djkyc")
+          owner, _, name = repo.partition("/")
+          header = f"👤 {owner} · 📁 {name}"
+          text = "\n".join([
+              header,
+              '🌐 签到平台：<a href="https://my.furry.box/">请点击</a>',
+              f'🔗 仓库：<a href="https://github.com/{repo}/">请点击</a>',
+              *lines,
+          ])
+
+          req = urllib.request.Request(
+              f"https://api.telegram.org/bot{token}/sendMessage",
+              data=json.dumps({"chat_id": chat_id, "text": text, "parse_mode": "HTML"}).encode(),
+              headers={"Content-Type": "application/json"},
+              method="POST",
+          )
+          urllib.request.urlopen(req, timeout=15)
+          print("Telegram 通知已发送")
+          PY
