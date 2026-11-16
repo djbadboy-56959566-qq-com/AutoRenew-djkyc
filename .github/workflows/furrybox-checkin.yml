@@ -1,0 +1,24 @@
+name: FurryBox Auto Checkin
+
+on:
+  schedule:
+    # 每天北京时间 08:00 执行 (UTC 00:00)，签到每天北京时间 0 点重置
+    - cron: '0 0 * * *'
+  workflow_dispatch: # 支持手动测试触发
+
+jobs:
+  checkin:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Run Checkin Script
+        env:
+          FURRYBOX_REFRESH_TOKEN: ${{ secrets.FURRYBOX_REFRESH_TOKEN }}
+          # 可选: 失败/成功推 Telegram，不设就不推
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        # checkin.py 放在 DigitalPlat-renew-djkyc 仓库的 furrybox/ 文件夹里，
+        # 不在仓库根目录，所以这里要带上 furrybox/ 路径
+        run: python3 furrybox/checkin.py
