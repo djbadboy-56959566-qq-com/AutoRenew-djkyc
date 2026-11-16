@@ -13,9 +13,14 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # 精简版：纯 Python 标准库，不用装 Chrome、不用 pip install
-      # login.py 放在仓库的 DigitalPlat/serv00-ct8/ 文件夹里，
-      # 不在仓库根目录，所以这里要带上完整路径
+      # 登录脚本本身是纯标准库，不用装依赖。
+      # 但通知这一步改用 requests，跟 DigitalPlat 续期那个
+      # 能正常收到微信的工作流用同一个库、同一套发法，
+      # 不再用 urllib——urllib 默认的 Python-urllib User-Agent
+      # 在 Cloudflare 前面容易被拦，requests 不会。
+      - name: Install requests
+        run: pip install requests
+
       - name: Run Login Script
         env:
           ACCOUNTS_JSON: ${{ secrets.ACCOUNTS_JSON }}
@@ -25,25 +30,21 @@ jobs:
       # 消息样式都在这一步里，不在脚本里。
       # 脚本只把结果写到 DigitalPlat/serv00-ct8/login_result.json，
       # 这里读结果，拼 TG + 微信两份消息再发。
-      # 规则（跟 DigitalPlat 续期那套一样）：
-      #   - TG 用 HTML：<a href> 可点链接，显示成“请点击”
-      #   - 微信用纯文本：微信模板消息不认 HTML 标签，
-      #     地址单独放一行，点开 / 复制都方便
-      #   - 两份消息共用同一份 login_result.json，只是渲染方式不同
+      # TG 用 HTML，微信用纯文本，地址单独放一行。
+      # 微信发法跟 DigitalPlat 续期一模一样：
+      # requests.post，body 带 token，头是 Bearer + token。
       # ============================================================
       - name: Send Notification
         if: always()
         env:
-          # 注意：这个仓库里已有的 Secret 名是 TG_BOT_TOKEN / TG_CHAT_ID，
-          # 不是 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID，
-          # 用错名字读出来是空的，就会报“Telegram 未配置，跳过”。
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           WX_PUSH_URL: ${{ secrets.WX_PUSH_URL }}
           WX_PUSH_TOKEN: ${{ secrets.WX_PUSH_TOKEN }}
         run: |
           python3 - << 'PY'
-          import json, os, urllib.request
+          import json, os
+          import requests
 
           try:
               with open("DigitalPlat/serv00-ct8/login_result.json", encoding="utf-8") as f:
@@ -52,7 +53,6 @@ jobs:
               results = [{"provider": "?", "username": "?", "panel": "",
                           "ok": False, "message": "脚本没有产出结果文件，请看 Actions 日志"}]
 
-          # 表头：用户名和项目名从 GITHUB_REPOSITORY 自动取
           repo = os.getenv("GITHUB_REPOSITORY", "你的用户名/你的仓库名")
           owner, _, name = repo.partition("/")
           repo_url = f"https://github.com/{repo}/"
@@ -92,38 +92,31 @@ jobs:
           tg_chat = os.getenv("TG_CHAT_ID")
           if tg_token and tg_chat:
               try:
-                  req = urllib.request.Request(
+                  res = requests.post(
                       f"https://api.telegram.org/bot{tg_token}/sendMessage",
-                      # disable_web_page_preview：不让 TG 把消息里的
-                      # serv00.com / ct8.pl 链接展开成广告卡片
-                      data=json.dumps({"chat_id": tg_chat, "text": tg_text, "parse_mode": "HTML", "disable_web_page_preview": True}).encode(),
-                      headers={"Content-Type": "application/json"},
-                      method="POST",
+                      json={"chat_id": tg_chat, "text": tg_text, "parse_mode": "HTML",
+                            "disable_web_page_preview": True},
+                      timeout=15,
                   )
-                  urllib.request.urlopen(req, timeout=15)
-                  print("Telegram 通知已发送")
+                  print(f"Telegram: {res.status_code} {res.text[:300]}")
               except Exception as e:
                   print(f"Telegram 通知异常: {e}")
           else:
               print("Telegram 未配置，跳过。")
 
-          # ---- 发送微信（自建 WXPush；格式跟 DigitalPlat 续期
-          # 那个 15:28 能正常收到的工作流保持一模一样：
-          # body 里带 token，Authorization 头是 Bearer + token。
-          # 别改成裸 token——这个仓库里的 WX_PUSH_URL / WX_PUSH_TOKEN
-          # 就是按这个格式收的，改了反而 403。----
+          # ---- 发送微信 ----
           wx_url = os.getenv("WX_PUSH_URL")
           wx_token = os.getenv("WX_PUSH_TOKEN")
           if wx_url and wx_token:
               try:
-                  req = urllib.request.Request(
+                  res = requests.post(
                       wx_url,
-                      data=json.dumps({"token": wx_token, "title": "Serv00 & CT8 自动登录保号", "content": wx_text}).encode(),
-                      headers={"Authorization": f"Bearer {wx_token}", "Content-Type": "application/json"},
-                      method="POST",
+                      json={"token": wx_token, "title": "Serv00 & CT8 自动登录保号", "content": wx_text},
+                      headers={"Authorization": f"Bearer {wx_token}",
+                               "Content-Type": "application/json"},
+                      timeout=15,
                   )
-                  with urllib.request.urlopen(req, timeout=15) as resp:
-                      print(f"微信: {resp.status} {resp.read()[:300]}")
+                  print(f"微信: {res.status_code} {res.text[:300]}")
               except Exception as e:
                   print(f"微信通知异常: {e}")
           else:
