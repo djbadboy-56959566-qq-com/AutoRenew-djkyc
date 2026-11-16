@@ -15,7 +15,14 @@ jobs:
 
       - name: Run Checkin Script
         env:
+          # 密码版(推荐): 每天现登现签，密码不会轮换作废
+          FURRYBOX_EMAIL: ${{ secrets.FURRYBOX_EMAIL }}
+          FURRYBOX_PASSWORD: ${{ secrets.FURRYBOX_PASSWORD }}
+          FURRYBOX_EMAIL_2: ${{ secrets.FURRYBOX_EMAIL_2 }}
+          FURRYBOX_PASSWORD_2: ${{ secrets.FURRYBOX_PASSWORD_2 }}
+          # 旧的 refresh_token 方式(回退用，会轮换作废，不推荐)
           FURRYBOX_REFRESH_TOKEN: ${{ secrets.FURRYBOX_REFRESH_TOKEN }}
+          FURRYBOX_REFRESH_TOKEN_2: ${{ secrets.FURRYBOX_REFRESH_TOKEN_2 }}
           # 可选: 失败/成功推 Telegram，不设就不推
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
