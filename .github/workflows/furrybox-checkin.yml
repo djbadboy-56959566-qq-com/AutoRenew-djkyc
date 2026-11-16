@@ -3,7 +3,7 @@ name: FurryBox Auto Checkin
 on:
   schedule:
     # 每天北京时间 08:00 执行 (UTC 00:00)，签到每天北京时间 0 点重置
-    - cron: '0 0 * * *'
+    - cron: '30 0 * * *'
   workflow_dispatch: # 支持手动测试触发
 
 jobs:
