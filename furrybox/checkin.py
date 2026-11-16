@@ -37,7 +37,8 @@ Secrets(一个账号一组，一个 Secret 只放一个值，不要挤):
   没设密码时才回退到旧的 refresh_token 方式(不推荐，会轮换作废)。
 
 退出码: 0 = 全部账号签到成功或今天已签到；1 = 至少一个账号失败。
-可选通知: 设 TG_BOT_TOKEN + TG_CHAT_ID，失败和成功都会推一条 Telegram。
+通知: 脚本本身不发通知，只把结果行写到 furrybox/checkin_result.txt，
+消息样式在工作流里，工作流读这个文件再发 Telegram。
 """
 
 import base64
@@ -50,27 +51,32 @@ import urllib.error
 SUPABASE_URL = "https://pwfcgdrorwpdzatxavdt.supabase.co"
 # Supabase publishable key，bundle.js 里公开的，不是秘密
 PUBLISHABLE_KEY = "sb_publishable_KWmBOppH3DRoJf4-g9UCwQ_qLUZojRR"
+# 邮箱 -> 显示名，结果行里显示名字，不只显示邮箱
+DISPLAY_NAMES = {
+    "56959566@qq.com": "dj56959566",
+    "adjlevis@qq.com": "adjlevis",
+}
+# 结果文件：脚本只把每个账号的一行结果写到这里，不发通知。
+# 消息样式、表头、链接都在工作流 .github/workflows/furrybox-checkin.yml 里，
+# 工作流读这个文件再发 Telegram。
+RESULT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "checkin_result.txt")
+
+
+def display_name(email):
+    return DISPLAY_NAMES.get(email, email.split("@")[0])
 
 
 def log(msg):
     print(msg, flush=True)
 
 
-def notify(text):
-    token = os.getenv("TG_BOT_TOKEN")
-    chat_id = os.getenv("TG_CHAT_ID")
-    if not token or not chat_id:
-        return
+def write_result(lines):
+    """把结果行写到 checkin_result.txt，供工作流发通知用。"""
     try:
-        req = urllib.request.Request(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            data=json.dumps({"chat_id": chat_id, "text": text}).encode(),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        urllib.request.urlopen(req, timeout=15)
+        with open(RESULT_FILE, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
     except Exception as e:
-        log(f"Telegram 通知发送失败(不影响签到结果): {e}")
+        log(f"写结果文件失败(不影响签到结果): {e}")
 
 
 def post_json(url, payload, headers=None, timeout=30):
@@ -160,7 +166,8 @@ def account_label(access_token, fallback="?"):
 
 
 def signin_with_access_token(label, access_token):
-    """拿着 access_token 查余额+签到，返回 True=成功/已签到。"""
+    """拿着 access_token 查余额+签到，返回通知里用的那一行（不直接发通知，
+    由 main() 把所有账号攒成一条发，表头只出现一次）。"""
     try:
         w_status, before = api_auth(access_token, "wallet")
         status, data = api_auth(access_token, "signin")
@@ -171,15 +178,13 @@ def signin_with_access_token(label, access_token):
     err_code = str(data.get("code") or data.get("error") or "")
     err_msg = str(data.get("message") or "")
     if status == 200:
-        msg = f"FurryBox 签到成功: +{data.get('amount', 5)} boxes，余额 {data.get('balance', balance_before)}"
-        log(f"✅ [{label}] {msg}")
-        notify(f"✅ [{label}] {msg}")
-        return True
+        msg = f"✅ {label} FurryBox 签到成功: +{data.get('amount', 5)} boxes，余额 {data.get('balance', balance_before)}"
+        log(msg)
+        return msg
     if "ALREADY_SIGNED_IN" in err_code or "已经签到" in err_msg:
-        msg = f"FurryBox 今天已经签到过了，余额 {balance_before}"
-        log(f"✅ [{label}] {msg}")
-        notify(f"✅ [{label}] {msg}")
-        return True
+        msg = f"✅ {label} FurryBox 今天已经签到过了，余额 {balance_before}"
+        log(msg)
+        return msg
     raise CheckinError(f"签到失败: HTTP {status} code={err_code} message={err_msg[:300]}")
 
 
@@ -211,16 +216,21 @@ def main():
     if pw_accounts:
         log(f"密码登录，共 {len(pw_accounts)} 个账号，开始签到...")
         results = []
+        lines = []
         for idx, (email, password) in enumerate(pw_accounts, 1):
-            label = f"账号{idx}({email})"
+            label = f"{display_name(email)}({email})"
             try:
                 log(f"[{label}] 正在用邮箱密码登录...")
                 access_token = login_with_password(email, password)
-                results.append(signin_with_access_token(label, access_token))
+                lines.append(signin_with_access_token(label, access_token))
+                results.append(True)
             except CheckinError as e:
-                log(f"❌ [{label}] {e}")
-                notify(f"❌ [{label}] {e}")
+                msg = f"❌ {label} {e}"
+                log(msg)
+                lines.append(msg)
                 results.append(False)
+        # 一次只发一条通知：表头一行，下面每个账号一行
+        write_result(lines)
         log(f"完成: {sum(results)}/{len(results)} 个账号签到成功")
         return 0 if all(results) else 1
 
@@ -230,27 +240,33 @@ def main():
         log("未设置邮箱密码，回退到 refresh_token 方式(会轮换作废，不推荐)...")
         log(f"共 {len(tokens)} 个账号，开始签到...")
         results = []
+        lines = []
         for idx, rt in enumerate(tokens, 1):
             label = f"账号{idx}"
             try:
                 log(f"[{label}] 正在用 refresh_token 换取 access_token...")
                 access_token = refresh_access_token(rt)
                 label = f"账号{idx}({account_label(access_token)})"
-                results.append(signin_with_access_token(label, access_token))
+                lines.append(signin_with_access_token(label, access_token))
+                results.append(True)
             except CheckinError as e:
-                log(f"❌ [{label}] {e}")
-                notify(f"❌ [{label}] {e}")
+                msg = f"❌ {label} {e}"
+                log(msg)
+                lines.append(msg)
                 results.append(False)
+        write_result(lines)
         log(f"完成: {sum(results)}/{len(results)} 个账号签到成功")
         return 0 if all(results) else 1
 
-    raise SystemExit(
+    msg = (
         "缺少凭证: 请设置邮箱密码\n"
         "  FURRYBOX_EMAIL / FURRYBOX_PASSWORD\n"
         "  多账号: FURRYBOX_EMAIL_2 / FURRYBOX_PASSWORD_2，依此类推\n"
         "先去 https://id.furry.box/ 点「忘记密码」给 56959566@qq.com 设一个密码\n"
         "(至少 8 位)，设好后先在网页上用邮箱+密码登录一次确认能进。"
     )
+    write_result(["❌ " + msg.split("\n")[0]])
+    raise SystemExit(msg)
 
 
 if __name__ == "__main__":
