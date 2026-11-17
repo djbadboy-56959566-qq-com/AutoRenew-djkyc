@@ -24,10 +24,10 @@ jobs:
           # 旧的 refresh_token 方式(回退用，会轮换作废，不推荐)
           FURRYBOX_REFRESH_TOKEN: ${{ secrets.FURRYBOX_REFRESH_TOKEN }}
           FURRYBOX_REFRESH_TOKEN_2: ${{ secrets.FURRYBOX_REFRESH_TOKEN_2 }}
-        # checkin.py 放在 DigitalPlat-renew-djkyc 仓库的 furrybox/ 文件夹里，
-        # 不在仓库根目录，所以这里要带上 furrybox/ 路径
-        # 脚本本身不发通知，只把结果行写到 furrybox/checkin_result.txt
-        run: python3 furrybox/checkin.py
+        # checkin.py 放在 DigitalPlat-renew-djkyc 仓库的 FurryBox/ 文件夹里，
+        # 不在仓库根目录，所以这里要带上 FurryBox/ 路径
+        # 脚本本身不发通知，只把结果行写到 FurryBox/checkin_result.txt
+        run: python3 FurryBox/checkin.py
 
       # 消息样式都在这一步里，不在脚本里。
       # 脚本只给结果行，这里拼表头、链接再发 Telegram。
@@ -47,9 +47,9 @@ jobs:
               print("未设置 TG_BOT_TOKEN / TG_CHAT_ID，跳过通知")
               raise SystemExit(0)
 
-          # 结果行：脚本写的 furrybox/checkin_result.txt，每行一个账号
+          # 结果行：脚本写的 FurryBox/checkin_result.txt，每行一个账号
           try:
-              with open("furrybox/checkin_result.txt", encoding="utf-8") as f:
+              with open("FurryBox/checkin_result.txt", encoding="utf-8") as f:
                   lines = [l.rstrip("\n") for l in f if l.strip()]
           except FileNotFoundError:
               lines = ["❌ 脚本没有产出结果文件，请看 Actions 日志"]
@@ -63,7 +63,7 @@ jobs:
           header = f"👤 {owner} · 📁 {name}"
           text = "\n".join([
               header,
-              '🌐 签到平台：<a href="https://my.furry.box/">请点击</a>',
+              '🌐 签到的平台：<a href="https://my.furry.box/">请点击</a>',
               f'🔗 仓库：<a href="https://github.com/{repo}/">请点击</a>',
               *lines,
           ])
