@@ -2,8 +2,9 @@ name: FurryBox Auto Checkin
 
 on:
   schedule:
-    # 每天北京时间 08:30 执行 (UTC 00:00)，签到每天北京时间 0 点重置
-    - cron: '30 0 * * *'
+    # 每天北京时间 08:37 执行 (UTC 00:37)，签到每天北京时间 0 点重置
+    # 故意不用整点 / 半点：GitHub 定时在整点前后最挤，任务可能被延迟甚至直接丢掉，不报错也不留记录
+    - cron: '37 0 * * *'
   workflow_dispatch: # 支持手动测试触发
 
 jobs:
