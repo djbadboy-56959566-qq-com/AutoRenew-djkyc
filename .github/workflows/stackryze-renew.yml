@@ -1,0 +1,174 @@
+# .github/workflows/renew.yml —— 放到仓库的 .github/workflows/renew.yml
+# StackRyze 域名自动续签，每周日北京时间 09:00 跑一次（UTC 01:00），
+# 只续 60 天内到期的域名，其余跳过；也可随时 Actions → Run workflow 手动跑。
+#
+# 定时说明：GitHub Actions 的 cron 用 UTC，北京时间 = UTC+8，
+# 每周日 09:00 北京时间 = 周日 UTC 01:00。定时任务不保证准点，
+# 通常晚几分钟到几十分钟属于正常；只在仓库默认分支上跑。
+#
+# 仓库 Secrets（Settings → Secrets and variables → Actions → New repository secret），
+# 千万不要把 cookie 写进代码或聊天记录里：
+#   STACKRYZE_API_URL - 后端 origin。取法：已登录的浏览器打开
+#     https://domain.stackryze.com/dashboard ，F12 → Network → 刷新，
+#     找到 /subdomains 那条请求，复制 Request URL 的 origin 部分。
+#   STACKRYZE_EMAILS  - 3 个账号邮箱，逗号分隔，与 cookie 按序号一一对应，
+#     例：56959566@qq.com,adjlevis@qq.com,djbadboy.vip@gmail.com
+#   STACKRYZE_COOKIE_1 / _2 / _3 - 每个账号导出的完整 Cookie 字符串。
+#     导出方法（每个账号单独做一遍，账号之间不要串）：
+#       1. 用那个账号登录 https://domain.stackryze.com/dashboard，
+#          等 Cloudflare 验证通过、能看到域名列表。
+#       2. 装 Cookie-Editor 这类扩展（或用浏览器自带的导出），
+#          在 API 那个 origin 下（不是 domain.stackryze.com 首页）
+#          导出全部 cookie，整串原样粘贴成一个 Secret。
+#          必须包含 cf_clearance（过 CF 质询用）和 freedomains.csrf
+#          （续期 CSRF 用），缺了前者会 403 Just a moment，缺了后者
+#          续期会被后端拒绝；会话 cookie 的名字不用管，整串都带上就行。
+#       3. 会话过期（401）或 CF 质询过期（403）时，通知里会单独说明，
+#          在浏览器里重新登录一次再导出替换对应的 Secret 即可。
+#   TG_BOT_TOKEN / TG_CHAT_ID - Telegram 通知（跟 DigitalPlat 那个仓库同一套）。
+#   WECHAT_API_URL / WECHAT_AUTH_TOKEN - 微信通知，自建 wxsend 接口，
+#     例：https://wx.djcf.pp.ua/wxsend（跟 CF 三网优选那个仓库同一套）。
+#
+# 通知规则（跟 DigitalPlat / CF 三网优选一致，脚本只写 JSON，样式全在这里）：
+#   - 一次运行只发一条消息；TG 用 HTML、微信用纯文本，内容相同。
+#   - 开头同一行：平台名 + 地址（显示为“请点击”的可点链接），
+#     项目 owner/repo + 仓库地址（同样显示为“请点击”）。
+#   - 后面每个账号一行结果，续期成功 / 失败 / 过期的域名逐个列出。
+name: StackRyze Renew
+
+on:
+  schedule:
+    # 每周日北京时间 09:00
+    - cron: "0 1 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  renew:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 检查并续期域名
+        env:
+          STACKRYZE_API_URL: ${{ secrets.STACKRYZE_API_URL }}
+          STACKRYZE_EMAILS: ${{ secrets.STACKRYZE_EMAILS }}
+          STACKRYZE_COOKIE_1: ${{ secrets.STACKRYZE_COOKIE_1 }}
+          STACKRYZE_COOKIE_2: ${{ secrets.STACKRYZE_COOKIE_2 }}
+          STACKRYZE_COOKIE_3: ${{ secrets.STACKRYZE_COOKIE_3 }}
+        run: |
+          pip install -q requests
+          python3 renew.py
+
+      - name: Send notification
+        if: always()
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          WECHAT_API_URL: ${{ secrets.WECHAT_API_URL }}
+          WECHAT_AUTH_TOKEN: ${{ secrets.WECHAT_AUTH_TOKEN }}
+        run: |
+          python3 - <<'PY'
+          import html, json, os, urllib.request
+
+          PLATFORM_URL = "https://domain.stackryze.com/dashboard"
+          repo = os.environ.get("GITHUB_REPOSITORY", "")
+          repo_url = f"https://github.com/{repo}" if repo else ""
+
+          try:
+              with open("renew_result.json", encoding="utf-8") as f:
+                  result = json.load(f)
+          except Exception as e:
+              result = {"status": "error", "summary": {},
+                        "accounts": [], "error": f"读不到 renew_result.json：{e}"}
+
+          summary = result.get("summary", {})
+          lines = []
+          for acc in result.get("accounts", []):
+              email = acc.get("email", "?")
+              counts = {}
+              for d in acc.get("domains", []):
+                  counts[d.get("result", "?")] = counts.get(d.get("result", "?"), 0) + 1
+              parts = []
+              if counts.get("renewed"):
+                  parts.append(f"续期成功 {counts['renewed']}")
+              if counts.get("skipped"):
+                  parts.append(f"跳过 {counts['skipped']}")
+              if counts.get("failed"):
+                  parts.append(f"失败 {counts['failed']}")
+              if counts.get("expired"):
+                  parts.append(f"已过期 {counts['expired']}")
+              head = f"账号{acc.get('index', '?')} · {email}：" + ("，".join(parts) if parts else (acc.get("error") or acc.get("status", "")))
+              lines.append(head)
+              for d in acc.get("domains", []):
+                  if d.get("result") in ("renewed", "failed", "expired"):
+                      lines.append(f"  {d.get('name')}（{d.get('expiry')}，剩 {d.get('remaining_days')} 天）：{d.get('detail')}")
+              if acc.get("status") in ("cf_challenge", "session_expired", "no_cookie", "error"):
+                  lines.append(f"  原因：{acc.get('error')}")
+          if result.get("error") and not result.get("accounts"):
+              lines.append(result["error"])
+          if not lines:
+              lines.append("没有账号结果。")
+          body = "\n".join(lines)
+          total = f"共 {summary.get('accounts', 0)} 个账号 / {summary.get('domains', 0)} 个域名，续期成功 {summary.get('renewed', 0)}，跳过 {summary.get('skipped', 0)}，失败 {summary.get('failed', 0)}，过期 {summary.get('expired', 0)}。"
+
+          # Telegram：HTML，链接显示为“请点击”
+          tg_text = (
+              f"StackRyze 域名续签\n"
+              f"平台：<a href=\"{PLATFORM_URL}\">请点击</a>\n"
+              f"项目：{html.escape(repo)} <a href=\"{repo_url}\">请点击</a>\n"
+              f"{html.escape(total)}\n"
+              f"{html.escape(body)}"
+          )
+          # 微信：纯文本，链接写原地址
+          wx_text = (
+              f"StackRyze 域名续签\n"
+              f"平台：{PLATFORM_URL}\n"
+              f"项目：{repo_url}\n"
+              f"{total}\n"
+              f"{body}"
+          )
+
+          def post_json(url, payload, headers=None):
+              req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"),
+                                           headers={"Content-Type": "application/json", **(headers or {})},
+                                           method="POST")
+              with urllib.request.urlopen(req, timeout=30) as r:
+                  return r.status, r.read().decode("utf-8", "replace")[:300]
+
+          tg_token = os.environ.get("TG_BOT_TOKEN", "")
+          tg_chat = os.environ.get("TG_CHAT_ID", "")
+          if tg_token and tg_chat:
+              try:
+                  print("TG:", post_json(f"https://api.telegram.org/bot{tg_token}/sendMessage",
+                      {"chat_id": tg_chat, "text": tg_text, "parse_mode": "HTML",
+                       "disable_web_page_preview": True}))
+              except Exception as e:
+                  print(f"TG 发送失败：{e}")
+          else:
+              print("TG 未配置，跳过。")
+
+          wx_url = os.environ.get("WECHAT_API_URL", "")
+          wx_token = os.environ.get("WECHAT_AUTH_TOKEN", "")
+          if wx_url and wx_token:
+              try:
+                  print("WX:", post_json(wx_url,
+                      {"token": wx_token, "title": "StackRyze 域名续签",
+                       "content": wx_text, "message": wx_text},
+                      headers={"Authorization": f"Bearer {wx_token}"}))
+              except Exception as e:
+                  print(f"微信发送失败：{e}")
+          else:
+              print("微信未配置，跳过。")
+          PY
+
+      - name: 把本次结果写到 Actions 摘要里
+        if: always()
+        run: |
+          if [ -f renew_result.json ]; then cat renew_result.json >> "$GITHUB_STEP_SUMMARY"; fi
