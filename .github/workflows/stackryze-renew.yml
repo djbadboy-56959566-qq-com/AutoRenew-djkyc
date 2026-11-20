@@ -256,11 +256,16 @@ jobs:
                   print("WX:", post_json(wx_url,
                       {"token": wx_token, "title": wx_title,
                        "content": wx_text},
-                      headers={"Authorization": f"Bearer {wx_token}"}))
+                      headers={"Authorization": f"Bearer {wx_token}",
+                               # wx.djcf.pp.ua 前面有 CF，默认 Python UA 会被
+                               # 浏览器完整性检查拦下（403 error code: 1010，
+                               # 2026-11-20 真跑日志 + 本地复现已证实），
+                               # 必须用浏览器 UA 才能走到 wxsend；token 本身没问题。
+                               "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}))
               except Exception as e:
-                  # 403 时把响应体打出来：wxsend 对错 token 只回
-                  # {"msg":"Invalid token"}，只看状态码分不清是 token
-                  # 错还是被 CF 拦了。
+                  # 403 时把响应体打出来：响应体是 {"msg":"Invalid token"}
+                  # 才是 token 错；是 "error code: 1010" 就是 CF 按 UA 拦的，
+                  # 跟 token 无关。
                   body = ""
                   try:
                       body = e.read().decode("utf-8", "replace")[:300]
