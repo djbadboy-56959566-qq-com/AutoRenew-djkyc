@@ -12,6 +12,14 @@
 #     过期就得重新进浏览器导一遍。
 #   - 真浏览器能自己通过这层质询，会话 cookie 由浏览器自己维护，
 #     脚本每次运行都重新登录，不依赖任何事先导出的东西。
+#   - 2026-11-20 真跑教训：无头 headless-shell 在 Actions 机房 IP 上
+#     120 秒过不了质询，3 个账号全报 cf_challenge。改成有头真 Chrome
+#     （channel="chrome"）+ playwright-stealth 伪装 + 质询超时刷新重试，
+#     再跑在 Xvfb 虚拟显示器下；这套是过 CF 托管质询成功率最高的常规
+#     办法，但机房 IP 仍可能被拦，不能打包票——再不过就得换家用 IP 跑。
+#   - 这站的盾要点勾才能过（用户 2026-11-20 确认）：wait_for_cf 在质询
+#     页出现时会自动点 Turnstile 的勾选框，勾完再点页面上的“验证”按钮，
+#     两步都做了还不过就刷新再等一次。
 #
 # 登录说明（2026-11-19 已核实，见源码 + Zitadel 文档）：
 #   - 本站登录页只有一个按钮“Continue with Stackryze SSO”，没有
@@ -65,6 +73,15 @@ try:
 except ImportError:
     pyotp = None
 
+try:
+    # playwright-stealth 2.x：Stealth().apply_stealth_sync(page)。
+    # 没装就跳过伪装（有头真 Chrome 本身已比 headless-shell 强得多）。
+    from playwright_stealth import Stealth
+
+    _STEALTH = Stealth()
+except ImportError:
+    _STEALTH = None
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
@@ -90,13 +107,6 @@ GRACE_DAYS = 15
 
 # 前端源码里的固定值（src/lib/api.js）
 CSRF_COOKIE_NAME = "freedomains.csrf"
-
-# 像正常 Chrome 一样访问，降低被质询拦截的概率。
-CHROME_UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/120.0.0.0 Safari/537.36"
-)
 
 CF_WAIT_SECONDS = 120
 
@@ -162,17 +172,94 @@ def page_text_contains(page, patterns):
     return None
 
 
-def wait_for_cf(page, timeout=CF_WAIT_SECONDS):
-    """等 Cloudflare 质询过去：标题不再是 "Just a moment..."。超时返回 False。"""
-    deadline = time.time() + timeout
-    while time.time() < deadline:
+def click_turnstile_checkbox(page):
+    """点 CF Turnstile 的“我是人类”勾选框（在 challenges.cloudflare.com
+    的 iframe 里）。用户 2026-11-20 确认：这站的盾要点勾才能过，不是
+    等几秒自动放行。先点 input 勾选框，再试 role=checkbox，最后点
+    整个 widget（整个框都可点）。点中返回 True，找不到返回 False。
+    注意：先用 count() 快速看一眼 iframe 在不在——没有就立刻返回，
+    不能让带超时的 wait_for 堵住外层的标题轮询（2026-11-20 冒烟测试
+    的教训：没 iframe 的页面上每次探测卡 7 秒，标题变了都看不到）。"""
+    try:
+        if page.locator("iframe[src*='challenges.cloudflare.com']").count() == 0:
+            return False
+    except Exception:
+        return False
+    frame = page.frame_locator("iframe[src*='challenges.cloudflare.com']").first
+    for selector in ("input[type='checkbox']", "[role='checkbox']"):
         try:
-            if "Just a moment" not in page.title():
-                return True
+            box = frame.locator(selector).first
+            box.wait_for(state="visible", timeout=2000)
+            box.click(timeout=3000)
+            return True
         except Exception:
-            pass
-        time.sleep(2)
+            continue
+    try:
+        frame.locator("body").click(timeout=3000)
+        return True
+    except Exception:
+        return False
+
+
+def wait_for_cf(page, timeout=CF_WAIT_SECONDS, retries=1):
+    """等 Cloudflare 质询过去：标题不再是 "Just a moment..."。
+    质询页出现时先点 Turnstile 勾选框，点了勾之后再去点页面上的
+    “验证”按钮（用户 2026-11-20 确认：勾完要点验证才能过）；两步
+    都做了还不过，超时后刷新一次再等，仍不过返回 False。"""
+    for attempt in range(retries + 1):
+        deadline = time.time() + timeout
+        clicked = False
+        while time.time() < deadline:
+            try:
+                if "Just a moment" not in page.title():
+                    return True
+            except Exception:
+                pass
+            if not clicked and click_turnstile_checkbox(page):
+                clicked = True
+                logger.info("已点 CF 勾选框，等质询通过。")
+            if clicked:
+                # 勾完出现的“验证”按钮，点了才放行；没有就跳过。
+                click_button_by_text(page, r"verify|验证", timeout=2000)
+            time.sleep(2)
+        if attempt < retries:
+            logger.warning("Cloudflare 质询没过去，刷新页面再等一次。")
+            try:
+                page.reload(wait_until="domcontentloaded", timeout=30000)
+            except Exception:
+                pass
     return False
+
+
+def launch_browser(p):
+    """启动浏览器。有头模式（Actions 里跑在 xvfb-run 下）优先用真 Chrome
+    （channel="chrome"，Google Chrome for Testing），再退到 Chromium；
+    无头模式保持原来的 Chromium。headless-shell 的自动化特征太明显，
+    CF 托管质询几乎必拦；有头真 Chrome + Stealth 才能过。"""
+    if not HEADLESS:
+        args = [
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-blink-features=AutomationControlled",
+            "--disable-infobars",
+            "--window-size=1366,900",
+        ]
+        for channel in ("chrome", None):
+            try:
+                kwargs = {"headless": False, "args": args}
+                if channel:
+                    kwargs["channel"] = channel
+                browser = p.chromium.launch(**kwargs)
+                logger.info(f"浏览器已启动（有头，channel={channel or 'chromium'}）。")
+                return browser
+            except Exception as e:
+                logger.warning(f"有头启动失败（channel={channel}）：{e}，换下一个。")
+        raise RuntimeError("有头浏览器启动失败：真 Chrome 和 Chromium 都起不来")
+    return p.chromium.launch(
+        headless=True,
+        args=["--no-sandbox", "--disable-dev-shm-usage",
+              "--disable-blink-features=AutomationControlled"],
+    )
 
 
 def first_visible(page, selector, timeout=5000):
@@ -459,9 +546,15 @@ def process_account(browser, email, password, index, totp_secret=None, probe=Fal
     context = browser.new_context(
         viewport={"width": 1280, "height": 800},
         locale="en-US",
-        user_agent=CHROME_UA,
+        # 不再硬编 UA：有头真 Chrome 用自己的真实 UA，跟浏览器版本一致，
+        # 硬编一个 Chrome/120 反而跟真 Chrome 158 对不上，成了破绽。
     )
     page = context.new_page()
+    if _STEALTH is not None:
+        try:
+            _STEALTH.apply_stealth_sync(page)
+        except Exception as e:
+            logger.warning(f"Stealth 伪装应用失败（继续跑）：{e}")
     captured = []
 
     def on_response(resp):
@@ -649,11 +742,7 @@ def main():
 
         accounts = []
         with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=HEADLESS,
-                args=["--no-sandbox", "--disable-dev-shm-usage",
-                      "--disable-blink-features=AutomationControlled"],
-            )
+            browser = launch_browser(p)
             try:
                 for idx, email in enumerate(EMAILS, 1):
                     # 密码和 TOTP 种子只从环境变量读进内存，绝不打印。
