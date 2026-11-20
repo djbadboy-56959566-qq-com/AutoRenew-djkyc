@@ -1,50 +1,51 @@
-# renew.py - StackRyze 域名自动续签（浏览器自动登录版）
+# stackryze_renew.py - StackRyze 域名自动续签（纯接口版，不用浏览器）
 #
-# 取代 2026-11-19 的 cookie 版：不用再导出 cookie，不用管 cookie 过期。
-# 真浏览器（Playwright Chromium）打开 dashboard → 点 SSO →
-# 在 Zitadel 登录页填邮箱+密码 → 回到 dashboard 后，在已登录的
-# 浏览器上下文里调前端同款接口查 / 续期域名。
+# 取代 2026-11-20 的浏览器版：浏览器版在 GitHub Actions 机房 IP 上走不通，
+# 调试证明 CF 给机房 IP 的是无交互 "Performing security verification" 页，
+# 0 个 iframe，没有勾选框可点；有头真 Chrome + Stealth 也过不去。
+# 纯接口版全程只用标准库 urllib，不装浏览器、不装任何 pip 包。
 #
-# 为什么必须用真浏览器（用户 2026-11-19 原话：cookie 要自动更新麻烦，
-# 网站有 CF 盾）：
-#   - 站点前面有 Cloudflare 质询，curl / requests 直接请求拿 403
-#     "Just a moment..."（2026-11-19 实测），cookie 里的 cf_clearance
-#     过期就得重新进浏览器导一遍。
-#   - 真浏览器能自己通过这层质询，会话 cookie 由浏览器自己维护，
-#     脚本每次运行都重新登录，不依赖任何事先导出的东西。
-#   - 2026-11-20 真跑教训：无头 headless-shell 在 Actions 机房 IP 上
-#     120 秒过不了质询，3 个账号全报 cf_challenge。改成有头真 Chrome
-#     （channel="chrome"）+ playwright-stealth 伪装 + 质询超时刷新重试，
-#     再跑在 Xvfb 虚拟显示器下；这套是过 CF 托管质询成功率最高的常规
-#     办法，但机房 IP 仍可能被拦，不能打包票——再不过就得换家用 IP 跑。
-#   - 这站的盾要点勾才能过（用户 2026-11-20 确认）：wait_for_cf 在质询
-#     页出现时会自动点 Turnstile 的勾选框，勾完再点页面上的“验证”按钮，
-#     两步都做了还不过就刷新再等一次。
+# 为什么能绕开 CF（2026-11-20 实测）：
+#   - 盾只在前端 domain.stackryze.com 前面；登录站 auth.stackryze.com
+#     和接口站 api-domains.stackryze.com 都不走 CF，curl 直接能通
+#     （API 未登录返回 FREEDOMAINS-SESSION-001，不是 CF 拦截）。
+#   - 前端源码 stackryze/FreeDomains：登录是 Zitadel SSO，后端
+#     api-domains.stackryze.com 是 OIDC 客户端；接口用 cookie 会话，
+#     写操作带 freedomains.csrf（x-csrf-token 头）。
 #
-# 登录说明（2026-11-19 已核实，见源码 + Zitadel 文档）：
-#   - 本站登录页只有一个按钮“Continue with Stackryze SSO”，没有
-#     用户名/密码框；点它跳到 Zitadel 登录页（auth.stackryze.com），
-#     在那里用邮箱（登录名）+密码登录，也可能要第二因素/通行密钥。
-#   - 邮箱+密码只从环境变量读，脚本绝不打印密码、不写进结果文件。
-#     密码只放 GitHub Secrets，绝不在聊天里发。
-#   - 如果账号开了第二因素（TOTP/短信码）或只剩通行密钥登录，
-#     脚本无法自动过，会把账号记为 needs_second_factor 并继续下一个，
-#     不会在那死等。配了 STACKRYZE_TOTP_N 的账号，脚本会现算验证码
-#     自动填进二步验证页（最多试 2 次）；没配的就直接记 needs_second_factor。
+# 登录流程（证据：前端源码 + 登录页 JS + 2026-11-20 curl 实测）：
+#   1. GET {API_BASE}/auth/zitadel → 302 到 Zitadel authorize（带 client_id、
+#      redirect_uri={API_BASE}/auth/zitadel/callback、state、PKCE
+#      code_challenge；后端把 state/verifier 存在自己的 cookie 里，全程
+#      用同一个 cookie jar 跟着走）。
+#   2. GET authorize → 307 到 /login?authRequest=V2_... → 307 到
+#      /en/login?authRequest=V2_...（200，Zitadel 登录页）。
+#   3. POST {AUTH_BASE}/api/login {username, password, authRequestId}
+#      （登录页 JS 里的原样调用；实测假账号返回 400
+#      {"code":"INVALID_DATA","message":"invalid credentials"}，
+#      说明请求格式正确）。2FA 强制的账号返回 mfaRequired + userId + orgId。
+#   4. POST {AUTH_BASE}/api/mfa/verify {userId, code, authRequestId,
+#      rememberDevice:false} → {callbackUrl}（登录页 MFA 组件里的原样调用；
+#      code 是 TOTP 种子现算的 6 位码，最多试 2 次）。
+#   5. GET callbackUrl → 302 回后端 /auth/zitadel/callback?code=...&state=...
+#      → 后端换 token、设会话 cookie。跟完跳转后用 GET {API_BASE}/auth/me
+#      验一下 authenticated=true 再往下走。
+#   6. GET {API_BASE}/subdomains 拿列表；POST
+#      {API_BASE}/subdomains/{id}/renew 续期，带 X-Requested-With 和
+#      x-csrf-token（freedomains.csrf cookie 的值）。
 #
 # 配置（GitHub Secrets 里填，不要写进仓库）：
 #   STACKRYZE_EMAILS     - 3 个账号邮箱，逗号分隔，
 #     例：56959566@qq.com,adjlevis@qq.com,djbadboy.vip@gmail.com
 #   STACKRYZE_PASSWORD_1 / _2 / _3
 #     - 与邮箱按序号一一对应的 Zitadel 密码。
-#   STACKRYZE_TOTP_1 / _2 / _3（可选，有 2FA 的账号才要）
-#     - 每个账号的验证器种子（TOTP secret），脚本用它现算 6 位验证码
-#       自动填进 Zitadel 的二步验证页。种子只放 Secrets，绝不发聊天。
-#     怎么拿到种子：在 Zitadel（auth.stackryze.com）账号设置里找到
-#       二步验证/验证器，重新设置一次会显示新的二维码和种子；
-#       当初设置时保存过二维码或种子文本的，直接用那个。
-#   STACKRYZE_DASHBOARD_URL - 可选，默认 https://domain.stackryze.com/dashboard
-#   STACKRYZE_HEADLESS   - 可选，默认 1（无头）；本地调试可设 0 看浏览器。
+#   STACKRYZE_TOTP_1 / _2 / _3（有 2FA 的账号必填，站里强制开了二步验证）
+#     - 每个账号的验证器种子（TOTP secret），脚本现算 6 位验证码。
+#       种子只放 Secrets，绝不发聊天；只取 secret= 后面那段，不要整个
+#       otpauth:// 地址。
+#   STACKRYZE_API_BASE   - 可选，默认 https://api-domains.stackryze.com
+#   STACKRYZE_AUTH_BASE  - 可选，默认 https://auth.stackryze.com
+#   （上面两个只在本地 mock 测试时改成 http://127.0.0.1:端口）
 #
 # 续期规则（官方文档 docs.stackryze.com）：
 #   - 到期前 60 天内才开续期，免费，续一次从原到期日往后延一年，
@@ -56,31 +57,23 @@
 # 通知文案全在 .github/workflows/stackryze-renew.yml 的 "Send notification" 步骤里。
 
 import argparse
+import base64
+import hashlib
+import hmac
+import http.client
+import http.cookiejar
 import json
 import logging
 import math
 import os
 import re
+import struct
 import sys
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import datetime, timezone
-from urllib.parse import urlparse
-
-from playwright.sync_api import sync_playwright
-
-try:
-    import pyotp  # 2FA 验证码现算用；没装时有 2FA 的账号会记 needs_second_factor
-except ImportError:
-    pyotp = None
-
-try:
-    # playwright-stealth 2.x：Stealth().apply_stealth_sync(page)。
-    # 没装就跳过伪装（有头真 Chrome 本身已比 headless-shell 强得多）。
-    from playwright_stealth import Stealth
-
-    _STEALTH = Stealth()
-except ImportError:
-    _STEALTH = None
 
 logging.basicConfig(
     level=logging.INFO,
@@ -89,19 +82,15 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- 1. 从环境变量中读取配置 ---
-DASHBOARD_URL = os.getenv(
-    "STACKRYZE_DASHBOARD_URL", "https://domain.stackryze.com/dashboard"
+API_BASE = os.getenv(
+    "STACKRYZE_API_BASE", "https://api-domains.stackryze.com"
+).strip().rstrip("/")
+AUTH_BASE = os.getenv(
+    "STACKRYZE_AUTH_BASE", "https://auth.stackryze.com"
 ).strip().rstrip("/")
 
 EMAILS_RAW = os.getenv("STACKRYZE_EMAILS", "")
 EMAILS = [e.strip() for e in EMAILS_RAW.split(",") if e.strip()]
-
-HEADLESS = os.getenv("STACKRYZE_HEADLESS", "1") != "0"
-
-# 调试开关：STACKRYZE_DEBUG_CF=1 时，质询过不去就把页面当时的样子
-# （URL、标题、iframe 列表、正文摘要 + 截图 + HTML）打出来并存文件。
-# 仅用于查 CF 到底给了什么页面，找到问题后删掉，平时保持关闭。
-CF_DEBUG = os.getenv("STACKRYZE_DEBUG_CF", "0") == "1"
 
 # 结构化结果的输出路径，工作流的通知步骤会读这个文件。
 RESULT_PATH = os.getenv("RENEW_RESULT_PATH", "stackryze_result.json")
@@ -110,10 +99,18 @@ RESULT_PATH = os.getenv("RENEW_RESULT_PATH", "stackryze_result.json")
 RENEW_WITHIN_DAYS = 60
 GRACE_DAYS = 15
 
-# 前端源码里的固定值（src/lib/api.js）
+# 后端 CSRF：freedomains.csrf cookie 的值放到 x-csrf-token 头（双提交模式）。
 CSRF_COOKIE_NAME = "freedomains.csrf"
 
-CF_WAIT_SECONDS = 120
+# 每次 HTTP 请求的超时（秒）。
+REQUEST_TIMEOUT = 30
+
+# 像正常 Chrome 一样访问。
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/120.0.0.0 Safari/537.36"
+)
 
 
 class AccountError(Exception):
@@ -131,6 +128,21 @@ def mask_email(email):
         return email or ""
     local, domain = email.split("@", 1)
     return f"{local[:2]}***@{domain}"
+
+
+def totp_now(secret):
+    """标准 TOTP（RFC 6238：SHA1、30 秒、6 位），纯标准库实现，
+    跟验证器 App / pyotp 算出来的一样。种子是 Base32 文本。"""
+    clean = re.sub(r"\s+", "", secret).upper()
+    # Base32 长度须是 8 的倍数，不足补 '='。
+    clean += "=" * (-len(clean) % 8)
+    key = base64.b32decode(clean)
+    counter = int(time.time()) // 30
+    msg = struct.pack(">Q", counter)
+    digest = hmac.new(key, msg, hashlib.sha1).digest()
+    offset = digest[-1] & 0x0F
+    code = (struct.unpack(">I", digest[offset:offset + 4])[0] & 0x7FFFFFFF) % 1000000
+    return f"{code:06d}"
 
 
 def parse_expiry_days(expiry_str):
@@ -165,388 +177,284 @@ def parse_expiry_days(expiry_str):
         return None
 
 
-def page_text_contains(page, patterns):
-    """页面正文里是否出现任一关键词（登录报错、第二因素等判断用）。"""
-    try:
-        text = page.locator("body").inner_text(timeout=3000).lower()
-    except Exception:
-        return None
-    for p in patterns:
-        if p.lower() in text:
-            return p
-    return None
+class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """不自动跟跳转：返回 3xx 响应本身，让调用方读 Location 自己决定。
+    urllib 默认跟跳转会把 POST 变 GET、还会丢 cookie 的归属判断，
+    登录链每一步都要看清跳去哪，所以手动跟。"""
 
-
-def dump_cf_state(page, tag):
-    """调试用：把质询页当时的 URL、标题、iframe 列表、正文摘要打到日志，
-    再存一张截图 + 一份 HTML。找到问题后删掉（STACKRYZE_DEBUG_CF=1 才开）。"""
-    if not CF_DEBUG:
-        return
-    try:
-        logger.info(f"[CF-DEBUG {tag}] url={page.url} title={page.title()!r}")
-    except Exception as e:
-        logger.info(f"[CF-DEBUG {tag}] 读 url/title 失败：{e}")
-    try:
-        srcs = page.locator("iframe").evaluate_all("els => els.map(e => e.src)")
-        logger.info(f"[CF-DEBUG {tag}] iframes({len(srcs)}): {srcs}")
-    except Exception as e:
-        logger.info(f"[CF-DEBUG {tag}] 读 iframe 失败：{e}")
-    try:
-        text = page.locator("body").inner_text(timeout=3000)
-        logger.info(f"[CF-DEBUG {tag}] body: {text[:1000]!r}")
-    except Exception as e:
-        logger.info(f"[CF-DEBUG {tag}] 读 body 失败：{e}")
-    try:
-        page.screenshot(path=f"cf_debug_{tag}.png")
-        with open(f"cf_debug_{tag}.html", "w", encoding="utf-8") as f:
-            f.write(page.content())
-        logger.info(f"[CF-DEBUG {tag}] 截图和 HTML 已存 cf_debug_{tag}.png/.html")
-    except Exception as e:
-        logger.info(f"[CF-DEBUG {tag}] 存截图/HTML 失败：{e}")
-
-
-def click_turnstile_checkbox(page):
-    """点 CF Turnstile 的“我是人类”勾选框（在 challenges.cloudflare.com
-    的 iframe 里）。用户 2026-11-20 确认：这站的盾要点勾才能过，不是
-    等几秒自动放行。先点 input 勾选框，再试 role=checkbox，最后点
-    整个 widget（整个框都可点）。点中返回 True，找不到返回 False。
-    注意：先用 count() 快速看一眼 iframe 在不在——没有就立刻返回，
-    不能让带超时的 wait_for 堵住外层的标题轮询（2026-11-20 冒烟测试
-    的教训：没 iframe 的页面上每次探测卡 7 秒，标题变了都看不到）。"""
-    try:
-        if page.locator("iframe[src*='challenges.cloudflare.com']").count() == 0:
-            return False
-    except Exception:
-        return False
-    frame = page.frame_locator("iframe[src*='challenges.cloudflare.com']").first
-    for selector in ("input[type='checkbox']", "[role='checkbox']"):
-        try:
-            box = frame.locator(selector).first
-            box.wait_for(state="visible", timeout=2000)
-            box.click(timeout=3000)
-            return True
-        except Exception:
-            continue
-    try:
-        frame.locator("body").click(timeout=3000)
-        return True
-    except Exception:
-        return False
-
-
-def wait_for_cf(page, timeout=CF_WAIT_SECONDS, retries=1):
-    """等 Cloudflare 质询过去：标题不再是 "Just a moment..."。
-    质询页出现时先点 Turnstile 勾选框，点了勾之后再去点页面上的
-    “验证”按钮（用户 2026-11-20 确认：勾完要点验证才能过）；两步
-    都做了还不过，超时后刷新一次再等，仍不过返回 False。"""
-    for attempt in range(retries + 1):
-        dump_cf_state(page, f"attempt{attempt}")
-        deadline = time.time() + timeout
-        clicked = False
-        while time.time() < deadline:
-            try:
-                if "Just a moment" not in page.title():
-                    return True
-            except Exception:
-                pass
-            if not clicked and click_turnstile_checkbox(page):
-                clicked = True
-                logger.info("已点 CF 勾选框，等质询通过。")
-            if clicked:
-                # 勾完出现的“验证”按钮，点了才放行；没有就跳过。
-                click_button_by_text(page, r"verify|验证", timeout=2000)
-            time.sleep(2)
-        dump_cf_state(page, f"attempt{attempt}-timeout")
-        if attempt < retries:
-            logger.warning("Cloudflare 质询没过去，刷新页面再等一次。")
-            try:
-                page.reload(wait_until="domcontentloaded", timeout=30000)
-            except Exception:
-                pass
-    return False
-
-
-def launch_browser(p):
-    """启动浏览器。有头模式（Actions 里跑在 xvfb-run 下）优先用真 Chrome
-    （channel="chrome"，Google Chrome for Testing），再退到 Chromium；
-    无头模式保持原来的 Chromium。headless-shell 的自动化特征太明显，
-    CF 托管质询几乎必拦；有头真 Chrome + Stealth 才能过。"""
-    if not HEADLESS:
-        args = [
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-blink-features=AutomationControlled",
-            "--disable-infobars",
-            "--window-size=1366,900",
-        ]
-        for channel in ("chrome", None):
-            try:
-                kwargs = {"headless": False, "args": args}
-                if channel:
-                    kwargs["channel"] = channel
-                browser = p.chromium.launch(**kwargs)
-                logger.info(f"浏览器已启动（有头，channel={channel or 'chromium'}）。")
-                return browser
-            except Exception as e:
-                logger.warning(f"有头启动失败（channel={channel}）：{e}，换下一个。")
-        raise RuntimeError("有头浏览器启动失败：真 Chrome 和 Chromium 都起不来")
-    return p.chromium.launch(
-        headless=True,
-        args=["--no-sandbox", "--disable-dev-shm-usage",
-              "--disable-blink-features=AutomationControlled"],
-    )
-
-
-def first_visible(page, selector, timeout=5000):
-    """某个选择器在 timeout 内是否可见。"""
-    try:
-        loc = page.locator(selector).first
-        loc.wait_for(state="visible", timeout=timeout)
-        return loc
-    except Exception:
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
 
 
-def click_button_by_text(page, pattern, timeout=5000):
-    """按文字点按钮（Continue / Next / Sign in 等），点到返回 True。"""
-    try:
-        btn = page.get_by_role("button", name=re.compile(pattern, re.I)).first
-        btn.wait_for(state="visible", timeout=timeout)
-        btn.click(timeout=timeout)
-        return True
-    except Exception:
-        return False
+class HttpClient:
+    """带 cookie jar 的 HTTP 客户端（urllib 标准库）。"""
 
-
-def wait_for_login_state(page, timeout=30):
-    """等 SPA 的鉴权跳转稳定再判断：登录页/SSO 按钮 → 'login'，
-    侧栏出现 My Domains → 'dashboard'（已登录），超时 → 'unknown'。
-    2026-11-20 的教训：goto 刚返回时 SPA 还没跳完，URL 还是 /dashboard
-    且没有 SSO 按钮，直接判断会误以为已登录，随后 goto /my-domains
-    被站内的跳转打断。"""
-    sso = page.get_by_role("button", name=re.compile(r"Continue with Stackryze SSO", re.I))
-    domains_link = page.get_by_role("link", name=re.compile(r"My Domains", re.I))
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if "/login" in page.url:
-            return "login"
-        try:
-            if sso.count() > 0:
-                return "login"
-        except Exception:
-            pass
-        try:
-            if domains_link.count() > 0:
-                return "dashboard"
-        except Exception:
-            pass
-        time.sleep(1)
-    return "unknown"
-
-
-def goto_with_retry(page, url, timeout=60000):
-    """goto 被站内另一次跳转打断时（SPA 登录后常有），等 3 秒再试一次。"""
-    try:
-        page.goto(url, wait_until="domcontentloaded", timeout=timeout)
-    except Exception as e:
-        if "interrupted by another navigation" in str(e):
-            logger.warning(f"goto {url} 被站内跳转打断，3 秒后重试。")
-            time.sleep(3)
-            page.goto(url, wait_until="domcontentloaded", timeout=timeout)
-        else:
-            raise
-
-
-def fill_totp_code(page, code):
-    """把 6 位验证码填进二步验证页：单个输入框、6 个单字框都支持。"""
-    single = first_visible(page, 'input[autocomplete="one-time-code"]', timeout=3000)
-    if single:
-        single.fill(code)
-        return True
-    boxes = page.locator('input[maxlength="1"]')
-    try:
-        n = boxes.count()
-    except Exception:
-        n = 0
-    if n >= 6:
-        for i, ch in enumerate(code[:n]):
-            boxes.nth(i).fill(ch)
-        return True
-    generic = first_visible(
-        page, 'input[type="text"], input[inputmode="numeric"]', timeout=3000
-    )
-    if generic:
-        generic.fill(code)
-        return True
-    return False
-
-
-def zitadel_login(page, email, password, home_netloc, totp_secret=None):
-    """在 Zitadel 登录页完成邮箱+密码登录，直到跳回本站 dashboard。"""
-    # 第一步：等登录页出现任一输入框（登录名或密码）。
-    deadline = time.time() + 30
-    loginname = password_field = None
-    while time.time() < deadline:
-        loginname = first_visible(
-            page,
-            'input[type="email"], input[name="loginName"], input[name="loginname"], '
-            'input[name="username"], input[autocomplete="username"]',
-            timeout=2000,
+    def __init__(self):
+        self.jar = http.cookiejar.CookieJar()
+        self.opener = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(self.jar),
+            NoRedirectHandler(),
         )
-        password_field = first_visible(
-            page, 'input[type="password"], input[autocomplete="current-password"]', timeout=2000
+
+    def request(self, method, url, body=None, headers=None, timeout=REQUEST_TIMEOUT, retries=2):
+        """发一次请求，不跟跳转。返回 (status, headers, body_bytes)。
+        3xx 也正常返回，不抛错；4xx/5xx 也一样，调用方按状态码判断。
+        网络层出问题（连接被断、响应被截断、超时）会自动重试几次；
+        续期 POST 不重试（重试可能把已成功的一次再算成失败）。"""
+        last_exc = None
+        for attempt in range(retries + 1):
+            try:
+                return self._request_once(method, url, body, headers, timeout)
+            except (urllib.error.URLError, http.client.HTTPException, TimeoutError, OSError) as e:
+                last_exc = e
+                if attempt < retries:
+                    logger.warning(
+                        f"请求 {url} 网络出错（{type(e).__name__}：{e}），"
+                        f"第 {attempt + 1}/{retries + 1} 次，稍后重试。"
+                    )
+                    time.sleep(1 + attempt)
+        raise AccountError(
+            "api_error",
+            f"请求 {url} 网络失败（已重试 {retries + 1} 次）：{last_exc}",
         )
-        if loginname or password_field:
-            break
-        # 只有通行密钥/第三方登录，没有密码框：先找“用密码登录”的退路。
-        if page_text_contains(page, ["passkey"]):
-            if click_button_by_text(page, r"password", timeout=3000):
+
+    def _request_once(self, method, url, body=None, headers=None, timeout=REQUEST_TIMEOUT):
+        data = None
+        hdrs = {"User-Agent": USER_AGENT, "Accept": "application/json"}
+        if body is not None:
+            data = json.dumps(body).encode("utf-8")
+            hdrs["Content-Type"] = "application/json"
+        if headers:
+            hdrs.update(headers)
+        req = urllib.request.Request(url, data=data, headers=hdrs, method=method)
+        try:
+            with self.opener.open(req, timeout=timeout) as resp:
+                return resp.status, resp.headers, resp.read()
+        except urllib.error.HTTPError as e:
+            # HTTPError 自带响应体（4xx/5xx 的错误 JSON 在里面）。
+            # 注意：HTTPError 是 URLError 的子类，这里先接住返回；
+            # 其余 URLError（DNS、连接失败等）不接，抛给外层重试。
+            return e.code, e.headers, e.read()
+
+    def get(self, url, **kwargs):
+        return self.request("GET", url, **kwargs)
+
+    def post_json(self, url, body, **kwargs):
+        return self.request("POST", url, body=body, **kwargs)
+
+    def follow(self, url, max_hops=10):
+        """手动跟跳转链（只跟 GET），返回 (final_status, final_url, body)。
+        每跳都经过同一个 cookie jar，所以后端 callback 设的会话 cookie
+        能留下来；终点哪怕是 CF 403 的前端页也不怕，cookie 已经到手。"""
+        current = url
+        for _ in range(max_hops):
+            status, headers, body = self.get(current)
+            if status in (301, 302, 303, 307, 308):
+                loc = headers.get("Location")
+                if not loc:
+                    return status, current, body
+                current = urllib.parse.urljoin(current, loc)
                 continue
-        if first_visible(page, 'button:has-text("GitHub")', timeout=2000) and not loginname:
-            raise AccountError(
-                "no_password_login",
-                "Zitadel 登录页没有邮箱密码框，只有第三方登录按钮，无法自动登录",
-            )
-        time.sleep(1)
-    if not loginname and not password_field:
+            return status, current, body
+        return status, current, body
+
+    def cookie_value(self, name):
+        """从 cookie jar 里取指定名字的值（CSRF 用）。"""
+        for c in self.jar:
+            if c.name == name:
+                return c.value
+        return None
+
+    @staticmethod
+    def json_body(body_bytes):
+        """解析 JSON 响应体，解析失败返回 None。"""
+        try:
+            return json.loads(body_bytes.decode("utf-8", "replace"))
+        except Exception:
+            return None
+
+    @staticmethod
+    def error_message(data, raw, max_len=200):
+        """从错误响应里抠一句人能看懂的原因：优先 message/error/code。"""
+        if isinstance(data, dict):
+            for key in ("message", "error", "msg", "detail"):
+                val = data.get(key)
+                if isinstance(val, str) and val.strip():
+                    return val.strip()[:max_len]
+                if isinstance(val, dict):
+                    for sub in ("message", "error"):
+                        if isinstance(val.get(sub), str) and val[sub].strip():
+                            return val[sub].strip()[:max_len]
+            if data.get("code"):
+                return str(data["code"])[:max_len]
+        text = raw.decode("utf-8", "replace").strip()
+        return text[:max_len] if text else "（无错误信息）"
+
+
+def zitadel_login(client, email, password, totp_secret=None):
+    """走 Zitadel 接口完成登录，拿到后端会话。成功返回 True。
+    步骤见文件头注释；每一步的失败都按类型报出来，不猜。"""
+    # 第 1 步：后端 /auth/zitadel → 302 到 Zitadel authorize。
+    status, headers, _ = client.get(f"{API_BASE}/auth/zitadel")
+    if status not in (301, 302, 303, 307, 308):
         raise AccountError(
             "login_failed",
-            "Zitadel 登录页 30 秒内没出现邮箱/密码输入框，页面结构可能变了",
+            f"后端 /auth/zitadel 没跳去 Zitadel（状态 {status}），"
+            "后端登录入口可能变了",
+        )
+    authorize_url = urllib.parse.urljoin(
+        f"{API_BASE}/auth/zitadel", headers.get("Location", "")
+    )
+    if "auth.stackryze.com" not in authorize_url and "/oauth/v2/authorize" not in authorize_url:
+        raise AccountError(
+            "login_failed",
+            f"后端 /auth/zitadel 跳去了一个意外的地址：{authorize_url[:120]}",
         )
 
-    # 第二步：如果只有登录名框，先填邮箱点继续，等密码框出现。
-    if loginname and not password_field:
-        loginname.fill(email)
-        if not click_button_by_text(page, r"continue|next", timeout=5000):
-            loginname.press("Enter")
-        password_field = first_visible(
-            page, 'input[type="password"], input[autocomplete="current-password"]', timeout=20000
+    # 第 2 步：authorize → 307 到登录页，取 authRequestId。
+    status, headers, _ = client.get(authorize_url)
+    if status not in (301, 302, 303, 307, 308):
+        raise AccountError(
+            "login_failed",
+            f"Zitadel authorize 没跳去登录页（状态 {status}），"
+            "授权请求可能被拒了",
         )
-        if not password_field:
-            hit = page_text_contains(
-                page, ["incorrect", "invalid", "not found", "locked", "too many"]
-            )
+    login_url = urllib.parse.urljoin(authorize_url, headers.get("Location", ""))
+    # 登录页本身还会 307 到 /en/login，手动跟到 200 为止。
+    status, final_url, _ = client.follow(login_url)
+    if status != 200:
+        raise AccountError(
+            "login_failed",
+            f"打开 Zitadel 登录页失败（状态 {status}），页面可能变了",
+        )
+    m = re.search(r"[?&]authRequest=([^&]+)", final_url)
+    if not m:
+        raise AccountError(
+            "login_failed",
+            f"登录页 URL 里没有 authRequestId（{final_url[:120]}），"
+            "登录页结构可能变了",
+        )
+    auth_request_id = urllib.parse.unquote(m.group(1))
+
+    # 第 3 步：POST /api/login 交邮箱密码（登录页 JS 的原样调用）。
+    status, _, raw = client.post_json(
+        f"{AUTH_BASE}/api/login",
+        {"username": email, "password": password, "authRequestId": auth_request_id},
+    )
+    data = client.json_body(raw)
+    if status == 200 and isinstance(data, dict):
+        if data.get("callbackUrl"):
+            return _finish_login(client, data["callbackUrl"])
+        if data.get("verifyRequired"):
             raise AccountError(
                 "login_failed",
-                f"填完邮箱后没出现密码框"
-                + (f"（页面提示含“{hit}”，邮箱可能不对）" if hit else "（可能要第二因素或页面结构变了）"),
+                "这个账号要先验证邮箱才能登录，请先在浏览器里完成邮箱验证再跑",
             )
-
-    # 第三步：填密码提交。注意：密码只填进输入框，绝不打印到任何地方。
-    password_field.fill(password)
-    if not click_button_by_text(page, r"continue|sign in|log in", timeout=5000):
-        password_field.press("Enter")
-
-    # 第四步：等跳回本站（dashboard 或 my-domains），同时盯着报错和第二因素。
-    # 有 TOTP 种子时，二步验证页出现就现算验证码填进去（最多试 2 次，
-    # 错了 Zitadel 会留在验证页并提示，可再试一次）；没种子则直接记
-    # needs_second_factor，不死等。
-    deadline = time.time() + 90
-    totp_attempts = 0
-    twofa_patterns = [
-        "second factor", "two-factor", "two factor", "authenticator",
-        "verification code", "enter the code", "one-time code", "one time code",
-    ]
-    while time.time() < deadline:
-        url = page.url
-        if urlparse(url).netloc == home_netloc and (
-            "/dashboard" in url or "/my-domains" in url or "/overview" in url
-        ):
-            return True
-        code_field = first_visible(
-            page, 'input[autocomplete="one-time-code"], input[maxlength="1"]', timeout=1000
-        )
-        twofa_text = page_text_contains(page, twofa_patterns)
-        if (code_field or twofa_text) and totp_secret and pyotp and totp_attempts < 2:
-            totp_attempts += 1
-            code = pyotp.TOTP(totp_secret).now()
-            logger.info("检测到二步验证，用 TOTP 种子现算验证码填入。")
-            if fill_totp_code(page, code):
-                if not click_button_by_text(
-                    page, r"continue|verify|sign in|confirm", timeout=5000
-                ):
-                    page.keyboard.press("Enter")
-                deadline = time.time() + 60
-                time.sleep(2)
-                continue
-        if code_field or twofa_text:
+        if data.get("changeRequired"):
             raise AccountError(
-                "needs_second_factor",
-                "Zitadel 要求第二因素验证码，脚本无法自动过："
-                "请给这个账号配 STACKRYZE_TOTP_N（验证器种子，放 Secrets 里），"
-                "或先在账号里关掉第二因素再跑",
+                "login_failed",
+                "这个账号的密码要求更换，请先在浏览器里改好密码再跑",
             )
-        hit = page_text_contains(
-            page, ["incorrect", "invalid password", "wrong password", "locked", "too many attempts"]
+        if data.get("mfaRequired") and data.get("userId"):
+            return _mfa_verify(
+                client, data["userId"], auth_request_id, totp_secret
+            )
+        raise AccountError(
+            "login_failed",
+            f"/api/login 返回了看不懂的结果：{str(data)[:200]}",
         )
-        if hit:
-            raise AccountError("login_failed", f"登录被拒（页面提示含“{hit}”，邮箱或密码不对）")
+    raise AccountError(
+        "login_failed",
+        f"邮箱或密码不对（/api/login 状态 {status}："
+        f"{client.error_message(data, raw)}）",
+    )
+
+
+def _mfa_verify(client, user_id, auth_request_id, totp_secret):
+    """二步验证：用 TOTP 种子现算验证码交 /api/mfa/verify，最多试 2 次。"""
+    if not totp_secret:
+        raise AccountError(
+            "needs_second_factor",
+            "Zitadel 要求第二因素验证码，但这个账号没配 STACKRYZE_TOTP_N"
+            "（验证器种子，放 Secrets 里），无法自动过",
+        )
+    last_error = ""
+    for attempt in range(2):
+        code = totp_now(totp_secret)
+        logger.info("检测到二步验证，用 TOTP 种子现算验证码提交。")
+        status, _, raw = client.post_json(
+            f"{AUTH_BASE}/api/mfa/verify",
+            {
+                "userId": user_id,
+                "code": code,
+                "authRequestId": auth_request_id,
+                "rememberDevice": False,
+            },
+        )
+        data = client.json_body(raw)
+        if status == 200 and isinstance(data, dict) and data.get("callbackUrl"):
+            return _finish_login(client, data["callbackUrl"])
+        last_error = client.error_message(data, raw)
+        logger.warning(f"二步验证第 {attempt + 1} 次没通过（状态 {status}：{last_error}），再试一次。")
         time.sleep(2)
     raise AccountError(
         "login_failed",
-        "提交密码后 90 秒没跳回 dashboard（可能要第二因素/通行密钥，或 Zitadel 页面结构变了）",
+        f"二步验证码两次都没通过（{last_error}），"
+        "可能是种子不对或手机时间不准，请检查 STACKRYZE_TOTP_N",
     )
 
 
-def fetch_domains_in_browser(page, origin, captured):
-    """拿域名列表：先用 dashboard 自己发的那条 /subdomains 请求的地址
-    （从而知道后端接口在哪），再在浏览器里按这个地址取一次列表；
-    没抓到就直接按同域取一次。返回 (api_base, domains)。"""
-    if captured:
-        api_url = captured[0]
-        api_base = api_url.split("/subdomains")[0]
-        url_to_fetch = api_url
-    else:
-        api_base = origin
-        url_to_fetch = origin + "/subdomains"
-
-    data = page.evaluate(
-        """async (url) => {
-            const r = await fetch(url, {
-                headers: {'X-Requested-With': 'XMLHttpRequest'},
-                credentials: 'include'
-            });
-            const t = await r.text();
-            return {status: r.status, body: t.slice(0, 20000)};
-        }""",
-        url_to_fetch,
+def _finish_login(client, callback_url):
+    """拿 callbackUrl 回后端换会话，再用 /auth/me 验一下。"""
+    status, final_url, _ = client.follow(callback_url)
+    logger.info(f"登录回调跟完，最终地址：{final_url[:100]}（状态 {status}）。")
+    status, _, raw = client.get(f"{API_BASE}/auth/me")
+    data = client.json_body(raw)
+    if status == 200 and isinstance(data, dict) and data.get("authenticated"):
+        return True
+    raise AccountError(
+        "login_failed",
+        f"回调后 /auth/me 没认出登录态（状态 {status}："
+        f"{client.error_message(data, raw)}），会话可能没建起来",
     )
-    if data["status"] != 200:
+
+
+def fetch_domains(client):
+    """拿域名列表。返回 (domains,)。"""
+    status, _, raw = client.get(
+        f"{API_BASE}/subdomains",
+        headers={"X-Requested-With": "XMLHttpRequest"},
+    )
+    data = client.json_body(raw)
+    if status != 200:
         raise AccountError(
             "api_error",
-            f"取域名列表失败（状态 {data['status']}）：{data['body'][:200]}",
+            f"取域名列表失败（状态 {status}：{client.error_message(data, raw)}）",
         )
-    try:
-        parsed = json.loads(data["body"])
-    except Exception as e:
-        raise AccountError("api_error", f"/subdomains 响应解析失败：{e}")
-
-    if isinstance(parsed, dict):
-        domains = parsed.get("data") or parsed.get("subdomains") or parsed.get("domains") or []
+    if isinstance(data, dict):
+        domains = data.get("data") or data.get("subdomains") or data.get("domains") or []
     else:
-        domains = parsed
-    return api_base, domains
+        domains = data
+    if not isinstance(domains, list):
+        raise AccountError("api_error", f"/subdomains 响应格式不对：{str(data)[:200]}")
+    return domains
 
 
-def api_renew(page, api_base, csrf, domain_id):
-    """在已登录的浏览器里调前端同款续期接口，返回 (status, body)。"""
-    result = page.evaluate(
-        """async ({base, id, csrf}) => {
-            const headers = {'Content-Type': 'application/json',
-                             'X-Requested-With': 'XMLHttpRequest'};
-            if (csrf) headers['x-csrf-token'] = csrf;
-            const r = await fetch(base + '/subdomains/' + id + '/renew', {
-                method: 'POST', headers, credentials: 'include'
-            });
-            const t = await r.text();
-            return {status: r.status, body: t.slice(0, 500)};
-        }""",
-        {"base": api_base, "id": domain_id, "csrf": csrf or ""},
+def api_renew(client, domain_id):
+    """调续期接口，返回 (status, body_text)。
+    续期不重试：响应丢了也可能是服务端已续成功，重试会把成功算成失败；
+    真丢了下次定时跑会看到新到期日自动跳过，不会重复续。"""
+    headers = {"X-Requested-With": "XMLHttpRequest"}
+    csrf = client.cookie_value(CSRF_COOKIE_NAME)
+    if csrf:
+        headers["x-csrf-token"] = csrf
+    status, _, raw = client.post_json(
+        f"{API_BASE}/subdomains/{domain_id}/renew", {}, headers=headers, retries=0
     )
-    return result["status"], result["body"]
+    return status, raw.decode("utf-8", "replace")
 
 
-def process_account(browser, email, password, index, totp_secret=None, probe=False):
+def process_account(email, password, index, totp_secret=None, probe=False):
     """处理单个账号：登录 → 拿列表 → 续 60 天内的域名。返回结构化 dict。"""
     account_label = f"{index}. {mask_email(email)}"
     logger.info(f"开始处理账号：{account_label}")
@@ -560,10 +468,10 @@ def process_account(browser, email, password, index, totp_secret=None, probe=Fal
             "domains": [],
         }
 
-    # TOTP 种子先验一次格式：错了直接报出来，别等进了二步验证页才崩。
-    if totp_secret and pyotp:
+    # TOTP 种子先验一次格式：错了直接报出来，别等进了二步验证才崩。
+    if totp_secret:
         try:
-            pyotp.TOTP(totp_secret).now()
+            totp_now(totp_secret)
         except Exception:
             return {
                 "index": index,
@@ -574,85 +482,13 @@ def process_account(browser, email, password, index, totp_secret=None, probe=Fal
                 "domains": [],
             }
 
-    home = urlparse(DASHBOARD_URL)
-    home_netloc = home.netloc
-    origin = f"{home.scheme}://{home.netloc}"
-
-    context = browser.new_context(
-        viewport={"width": 1280, "height": 800},
-        locale="en-US",
-        # 不再硬编 UA：有头真 Chrome 用自己的真实 UA，跟浏览器版本一致，
-        # 硬编一个 Chrome/120 反而跟真 Chrome 158 对不上，成了破绽。
-    )
-    page = context.new_page()
-    if _STEALTH is not None:
-        try:
-            _STEALTH.apply_stealth_sync(page)
-        except Exception as e:
-            logger.warning(f"Stealth 伪装应用失败（继续跑）：{e}")
-    captured = []
-
-    def on_response(resp):
-        # 只记 URL，不在这里读响应体：在 handler 里调 resp.body()/resp.json()
-        # 会失败。列表后面用浏览器里的 fetch 再取一次。
-        try:
-            if "/subdomains" in resp.url and resp.request.method == "GET" and resp.status == 200:
-                captured.append(resp.url)
-        except Exception:
-            pass
-
-    page.on("response", on_response)
+    client = HttpClient()
     try:
-        goto_with_retry(page, DASHBOARD_URL)
-        if not wait_for_cf(page):
-            raise AccountError(
-                "cf_challenge",
-                "Cloudflare 质询 120 秒没过去（真浏览器也没通过），本次无法登录",
-            )
+        zitadel_login(client, email, password, totp_secret)
+        logger.info(f"账号 {account_label} 登录成功。")
 
-        # 先等 SPA 的鉴权跳转稳定，再判断是登录页还是已登录的仪表盘。
-        state = wait_for_login_state(page)
-        if state == "unknown":
-            raise AccountError(
-                "login_failed",
-                "打开 dashboard 后 30 秒没出现登录按钮也没出现仪表盘菜单，"
-                "页面可能卡住了或结构变了",
-            )
-        if state == "login":
-            logger.info(f"账号 {account_label} 未登录，点 SSO 去 Zitadel 登录。")
-            sso = page.get_by_role(
-                "button", name=re.compile(r"Continue with Stackryze SSO", re.I)
-            )
-            sso.first.click(timeout=15000)
-            # 等离开登录页：跳到 Zitadel，或直接回到 dashboard。
-            deadline = time.time() + 60
-            while time.time() < deadline:
-                if "/dashboard" in page.url or "/my-domains" in page.url:
-                    break
-                if first_visible(
-                    page,
-                    'input[type="email"], input[type="password"], '
-                    'input[name="loginName"], input[name="username"]',
-                    timeout=2000,
-                ):
-                    break
-                time.sleep(1)
-            if "/dashboard" not in page.url and "/my-domains" not in page.url:
-                zitadel_login(page, email, password, home_netloc, totp_secret)
-                if not wait_for_cf(page):
-                    raise AccountError("cf_challenge", "登录后 Cloudflare 质询 120 秒没过去")
-            logger.info(f"账号 {account_label} 登录成功。")
-
-        # 进 My Domains，强制拉一次域名列表，顺便抓到后端接口地址。
-        goto_with_retry(page, origin + "/my-domains")
-        if not wait_for_cf(page):
-            raise AccountError("cf_challenge", "进 My Domains 时 Cloudflare 质询 120 秒没过去")
-        deadline = time.time() + 30
-        while time.time() < deadline and not captured:
-            time.sleep(1)
-
-        api_base, domains = fetch_domains_in_browser(page, origin, captured)
-        logger.info(f"账号 {account_label} 后端接口：{api_base}，域名 {len(domains)} 个。")
+        domains = fetch_domains(client)
+        logger.info(f"账号 {account_label} 域名 {len(domains)} 个。")
 
         if not domains:
             return {
@@ -662,13 +498,6 @@ def process_account(browser, email, password, index, totp_secret=None, probe=Fal
                 "error": None,
                 "domains": [],
             }
-
-        # CSRF：从浏览器 cookie 里取 freedomains.csrf（前端同款做法）。
-        csrf = None
-        for c in context.cookies():
-            if c.get("name") == CSRF_COOKIE_NAME:
-                csrf = c.get("value")
-                break
 
         domain_results = []
         for d in domains:
@@ -715,7 +544,7 @@ def process_account(browser, email, password, index, totp_secret=None, probe=Fal
                 })
                 continue
 
-            http_status, body = api_renew(page, api_base, csrf, domain_id)
+            http_status, body = api_renew(client, domain_id)
             if http_status in (200, 201):
                 logger.info(f"域名 {full_name} 续期成功！")
                 domain_results.append({
@@ -751,11 +580,9 @@ def process_account(browser, email, password, index, totp_secret=None, probe=Fal
             "index": index,
             "email": mask_email(email),
             "status": "error",
-            "error": f"浏览器操作异常：{str(e)[:200]}",
+            "error": f"请求异常：{str(e)[:200]}",
             "domains": [],
         }
-    finally:
-        context.close()
 
 
 def write_result(result):
@@ -766,7 +593,7 @@ def write_result(result):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="StackRyze 域名自动续签（浏览器自动登录版）")
+    parser = argparse.ArgumentParser(description="StackRyze 域名自动续签（纯接口版）")
     parser.add_argument("--probe", action="store_true",
                         help="只探查：登录第一个账号，列出域名和剩余天数，不续期")
     args = parser.parse_args()
@@ -776,23 +603,18 @@ def main():
             raise ValueError("缺少必需的环境变量 STACKRYZE_EMAILS（3 个账号邮箱，逗号分隔）。")
 
         accounts = []
-        with sync_playwright() as p:
-            browser = launch_browser(p)
-            try:
-                for idx, email in enumerate(EMAILS, 1):
-                    # 密码和 TOTP 种子只从环境变量读进内存，绝不打印。
-                    password = os.getenv(f"STACKRYZE_PASSWORD_{idx}", "")
-                    totp_secret = os.getenv(f"STACKRYZE_TOTP_{idx}", "")
-                    accounts.append(
-                        process_account(
-                            browser, email, password, idx,
-                            totp_secret=totp_secret, probe=args.probe,
-                        )
-                    )
-                    if args.probe:
-                        break
-            finally:
-                browser.close()
+        for idx, email in enumerate(EMAILS, 1):
+            # 密码和 TOTP 种子只从环境变量读进内存，绝不打印。
+            password = os.getenv(f"STACKRYZE_PASSWORD_{idx}", "")
+            totp_secret = os.getenv(f"STACKRYZE_TOTP_{idx}", "")
+            accounts.append(
+                process_account(
+                    email, password, idx,
+                    totp_secret=totp_secret, probe=args.probe,
+                )
+            )
+            if args.probe:
+                break
 
         if args.probe:
             for acc in accounts:
