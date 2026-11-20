@@ -1,7 +1,9 @@
 # .github/workflows/stackryze-renew.yml —— 放到仓库的 .github/workflows/stackryze-renew.yml
 # 注意：不要叫 renew.yml、脚本不要叫 renew.py，那两个名字已经被同仓库里
-# DigitalPlat 的续签占了（根目录 renew.py + .github/workflows/renew.yml），
+# DigitalPlat 的续签占了（DigitalPlat/renew.py + .github/workflows/renew.yml），
 # 同名会互相覆盖；结果文件也改叫 stackryze_result.json 以示区分。
+# 脚本放在仓库的 stackryze/ 文件夹里，工作流用 stackryze/stackryze_renew.py
+# 这个路径跑；结果文件写在仓库根目录，通知步骤在根目录读它。
 # StackRyze 域名自动续签，每周日北京时间 09:00 跑一次（UTC 01:00），
 # 只续 60 天内到期的域名，其余跳过；也可随时 Actions → Run workflow 手动跑。
 #
@@ -63,7 +65,7 @@ jobs:
         run: |
           pip install -q playwright
           playwright install --with-deps chromium
-          python3 stackryze_renew.py
+          python3 stackryze/stackryze_renew.py
 
       - name: Send notification
         if: always()
