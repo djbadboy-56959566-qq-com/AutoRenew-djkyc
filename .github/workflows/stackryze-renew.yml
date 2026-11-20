@@ -1,4 +1,7 @@
-# .github/workflows/renew.yml —— 放到仓库的 .github/workflows/renew.yml
+# .github/workflows/stackryze-renew.yml —— 放到仓库的 .github/workflows/stackryze-renew.yml
+# 注意：不要叫 renew.yml、脚本不要叫 renew.py，那两个名字已经被同仓库里
+# DigitalPlat 的续签占了（根目录 renew.py + .github/workflows/renew.yml），
+# 同名会互相覆盖；结果文件也改叫 stackryze_result.json 以示区分。
 # StackRyze 域名自动续签，每周日北京时间 09:00 跑一次（UTC 01:00），
 # 只续 60 天内到期的域名，其余跳过；也可随时 Actions → Run workflow 手动跑。
 #
@@ -9,7 +12,7 @@
 # 仓库 Secrets（Settings → Secrets and variables → Actions → New repository secret），
 # 千万不要把密码写进代码或聊天记录里，只放 Secrets：
 #   STACKRYZE_EMAILS     - 3 个账号邮箱，逗号分隔，
-#     例：5695956633@qq.com,adjlevis33@qq.com,djbadboy.vip44@gmail.com
+#     例：56959566@qq.com,adjlevis@qq.com,djbadboy.vip@gmail.com
 #   STACKRYZE_PASSWORD_1 / _2 / _3
 #     - 与邮箱按序号一一对应的 Zitadel 登录密码（在 Zitadel 登录页输的那个）。
 #     再加账号就按序号往下加 _4、_5……：仓库里加同名 Secret，
@@ -60,7 +63,7 @@ jobs:
         run: |
           pip install -q playwright
           playwright install --with-deps chromium
-          python3 renew.py
+          python3 stackryze_renew.py
 
       - name: Send notification
         if: always()
@@ -78,11 +81,11 @@ jobs:
           repo_url = f"https://github.com/{repo}" if repo else ""
 
           try:
-              with open("renew_result.json", encoding="utf-8") as f:
+              with open("stackryze_result.json", encoding="utf-8") as f:
                   result = json.load(f)
           except Exception as e:
               result = {"status": "error", "summary": {},
-                        "accounts": [], "error": f"读不到 renew_result.json：{e}"}
+                        "accounts": [], "error": f"读不到 stackryze_result.json：{e}"}
 
           summary = result.get("summary", {})
           lines = []
@@ -167,4 +170,4 @@ jobs:
       - name: 把本次结果写到 Actions 摘要里
         if: always()
         run: |
-          if [ -f renew_result.json ]; then cat renew_result.json >> "$GITHUB_STEP_SUMMARY"; fi
+          if [ -f stackryze_result.json ]; then cat stackryze_result.json >> "$GITHUB_STEP_SUMMARY"; fi
