@@ -69,6 +69,7 @@ jobs:
       - name: 检查并续期域名
         env:
           STACKRYZE_HEADLESS: "0"
+          STACKRYZE_DEBUG_CF: "1"
           STACKRYZE_EMAILS: ${{ secrets.STACKRYZE_EMAILS }}
           STACKRYZE_PASSWORD_1: ${{ secrets.STACKRYZE_PASSWORD_1 }}
           STACKRYZE_PASSWORD_2: ${{ secrets.STACKRYZE_PASSWORD_2 }}
@@ -84,6 +85,16 @@ jobs:
           pip install -q playwright pyotp playwright-stealth
           playwright install --with-deps chromium chrome
           xvfb-run -a python3 stackryze/stackryze_renew.py
+
+      - name: 上传 CF 调试图
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cf-debug
+          path: |
+            cf_debug_*.png
+            cf_debug_*.html
+          if-no-files-found: ignore
 
       - name: Send notification
         if: always()
