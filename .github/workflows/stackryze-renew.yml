@@ -35,6 +35,10 @@
 # 注意：脚本用真浏览器登录，会自己过 Cloudflare 质询；如果哪个账号
 # 开了第二因素（验证码/验证器）或只剩通行密钥登录，那次运行会把这个
 # 账号记为 needs_second_factor 并继续下一个，不会死等。
+# 2026-11-20 真跑教训：无头 headless-shell 在 Actions 机房 IP 上 120 秒
+# 过不了质询，3 个账号全报 cf_challenge。所以现在用有头真 Chrome
+# （playwright install chrome，channel="chrome"）+ playwright-stealth，
+# 跑在 xvfb-run 虚拟显示器下；STACKRYZE_HEADLESS=0 就是开有头模式。
 #
 # 通知规则（跟 DigitalPlat / CF 三网优选一致，脚本只写 JSON，样式全在这里）：
 #   - 一次运行只发一条消息；TG 用 HTML、微信用纯文本，内容相同。
@@ -64,6 +68,7 @@ jobs:
 
       - name: 检查并续期域名
         env:
+          STACKRYZE_HEADLESS: "0"
           STACKRYZE_EMAILS: ${{ secrets.STACKRYZE_EMAILS }}
           STACKRYZE_PASSWORD_1: ${{ secrets.STACKRYZE_PASSWORD_1 }}
           STACKRYZE_PASSWORD_2: ${{ secrets.STACKRYZE_PASSWORD_2 }}
@@ -76,9 +81,9 @@ jobs:
           STACKRYZE_TOTP_4: ${{ secrets.STACKRYZE_TOTP_4 }}
           STACKRYZE_TOTP_5: ${{ secrets.STACKRYZE_TOTP_5 }}
         run: |
-          pip install -q playwright pyotp
-          playwright install --with-deps chromium
-          python3 stackryze/stackryze_renew.py
+          pip install -q playwright pyotp playwright-stealth
+          playwright install --with-deps chromium chrome
+          xvfb-run -a python3 stackryze/stackryze_renew.py
 
       - name: Send notification
         if: always()
