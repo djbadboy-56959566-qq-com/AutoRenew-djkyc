@@ -21,8 +21,9 @@
 #     工作流 env 里已预留了 _4、_5 两行，STACKRYZE_EMAILS 后面逗号加邮箱就行。
 #     旧的 STACKRYZE_API_URL / STACKRYZE_COOKIE_1/2/3 不再用了，可以删掉。
 #   TG_BOT_TOKEN / TG_CHAT_ID - Telegram 通知（跟 DigitalPlat 那个仓库同一套）。
-#   WECHAT_API_URL / WECHAT_AUTH_TOKEN - 微信通知，自建 wxsend 接口，
-#     例：https://wx.djcf.pp.ua/wxsend（跟 CF 三网优选那个仓库同一套）。
+#   WX_PUSH_URL / WX_PUSH_TOKEN - 微信通知，自建 wxsend 接口
+#     （跟本仓库 DigitalPlat 那个工作流同一套名字，别用 WECHAT_API_URL，
+#     这个仓库里没有那两个 Secret，用了就是空的）。
 #
 # 注意：脚本用真浏览器登录，会自己过 Cloudflare 质询；如果哪个账号
 # 开了第二因素（验证码/验证器）或只剩通行密钥登录，那次运行会把这个
@@ -72,8 +73,8 @@ jobs:
         env:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-          WECHAT_API_URL: ${{ secrets.WECHAT_API_URL }}
-          WECHAT_AUTH_TOKEN: ${{ secrets.WECHAT_AUTH_TOKEN }}
+          WX_PUSH_URL: ${{ secrets.WX_PUSH_URL }}
+          WX_PUSH_TOKEN: ${{ secrets.WX_PUSH_TOKEN }}
         run: |
           python3 - <<'PY'
           import html, json, os, urllib.request
@@ -155,13 +156,13 @@ jobs:
           else:
               print("TG 未配置，跳过。")
 
-          wx_url = os.environ.get("WECHAT_API_URL", "")
-          wx_token = os.environ.get("WECHAT_AUTH_TOKEN", "")
+          wx_url = os.environ.get("WX_PUSH_URL", "")
+          wx_token = os.environ.get("WX_PUSH_TOKEN", "")
           if wx_url and wx_token:
               try:
                   print("WX:", post_json(wx_url,
                       {"token": wx_token, "title": "StackRyze 域名续签",
-                       "content": wx_text, "message": wx_text},
+                       "content": wx_text},
                       headers={"Authorization": f"Bearer {wx_token}"}))
               except Exception as e:
                   print(f"微信发送失败：{e}")
