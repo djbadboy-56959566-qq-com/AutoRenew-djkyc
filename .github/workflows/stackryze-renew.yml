@@ -32,13 +32,16 @@
 #     （跟本仓库 DigitalPlat 那个工作流同一套名字，别用 WECHAT_API_URL，
 #     这个仓库里没有那两个 Secret，用了就是空的）。
 #
-# 注意：脚本用真浏览器登录，会自己过 Cloudflare 质询；如果哪个账号
-# 开了第二因素（验证码/验证器）或只剩通行密钥登录，那次运行会把这个
-# 账号记为 needs_second_factor 并继续下一个，不会死等。
-# 2026-11-20 真跑教训：无头 headless-shell 在 Actions 机房 IP 上 120 秒
-# 过不了质询，3 个账号全报 cf_challenge。所以现在用有头真 Chrome
-# （playwright install chrome，channel="chrome"）+ playwright-stealth，
-# 跑在 xvfb-run 虚拟显示器下；STACKRYZE_HEADLESS=0 就是开有头模式。
+# 纯接口版（2026-11-20，取代浏览器版）：脚本只用 Python 标准库 urllib，
+# 不装浏览器、不装任何 pip 包。浏览器版在 Actions 机房 IP 上走不通——
+# 调试证明 CF 给机房 IP 的是无交互 "Performing security verification" 页，
+# 0 个 iframe，没有勾选框可点，有头真 Chrome + Stealth 也过不去。
+# 接口版绕开前端：盾只在 domain.stackryze.com 前面，登录站
+# auth.stackryze.com 和接口站 api-domains.stackryze.com 都不走 CF；
+# 脚本调 Zitadel 登录接口（/api/login + /api/mfa/verify）拿会话，
+# 再调 /subdomains 列表和 /subdomains/{id}/renew 续期。
+# 2026-11-20 本地 mock 端到端已通过（登录→2FA→续期→结果），
+# 真站假账号已验证登录链（返回 invalid credentials，格式正确）。
 #
 # 通知规则（跟 DigitalPlat / CF 三网优选一致，脚本只写 JSON，样式全在这里）：
 #   - 一次运行只发一条消息；TG 用 HTML、微信用纯文本，内容相同。
@@ -68,8 +71,6 @@ jobs:
 
       - name: 检查并续期域名
         env:
-          STACKRYZE_HEADLESS: "0"
-          STACKRYZE_DEBUG_CF: "1"
           STACKRYZE_EMAILS: ${{ secrets.STACKRYZE_EMAILS }}
           STACKRYZE_PASSWORD_1: ${{ secrets.STACKRYZE_PASSWORD_1 }}
           STACKRYZE_PASSWORD_2: ${{ secrets.STACKRYZE_PASSWORD_2 }}
@@ -82,19 +83,7 @@ jobs:
           STACKRYZE_TOTP_4: ${{ secrets.STACKRYZE_TOTP_4 }}
           STACKRYZE_TOTP_5: ${{ secrets.STACKRYZE_TOTP_5 }}
         run: |
-          pip install -q playwright pyotp playwright-stealth
-          playwright install --with-deps chromium chrome
-          xvfb-run -a python3 stackryze/stackryze_renew.py
-
-      - name: 上传 CF 调试图
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: cf-debug
-          path: |
-            cf_debug_*.png
-            cf_debug_*.html
-          if-no-files-found: ignore
+          python3 stackryze/stackryze_renew.py
 
       - name: Send notification
         if: always()
