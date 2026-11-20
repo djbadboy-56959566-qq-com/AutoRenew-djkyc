@@ -21,13 +21,20 @@
 #     密码只放 GitHub Secrets，绝不在聊天里发。
 #   - 如果账号开了第二因素（TOTP/短信码）或只剩通行密钥登录，
 #     脚本无法自动过，会把账号记为 needs_second_factor 并继续下一个，
-#     不会在那死等。
+#     不会在那死等。配了 STACKRYZE_TOTP_N 的账号，脚本会现算验证码
+#     自动填进二步验证页（最多试 2 次）；没配的就直接记 needs_second_factor。
 #
 # 配置（GitHub Secrets 里填，不要写进仓库）：
 #   STACKRYZE_EMAILS     - 3 个账号邮箱，逗号分隔，
 #     例：56959566@qq.com,adjlevis@qq.com,djbadboy.vip@gmail.com
 #   STACKRYZE_PASSWORD_1 / _2 / _3
 #     - 与邮箱按序号一一对应的 Zitadel 密码。
+#   STACKRYZE_TOTP_1 / _2 / _3（可选，有 2FA 的账号才要）
+#     - 每个账号的验证器种子（TOTP secret），脚本用它现算 6 位验证码
+#       自动填进 Zitadel 的二步验证页。种子只放 Secrets，绝不发聊天。
+#     怎么拿到种子：在 Zitadel（auth.stackryze.com）账号设置里找到
+#       二步验证/验证器，重新设置一次会显示新的二维码和种子；
+#       当初设置时保存过二维码或种子文本的，直接用那个。
 #   STACKRYZE_DASHBOARD_URL - 可选，默认 https://domain.stackryze.com/dashboard
 #   STACKRYZE_HEADLESS   - 可选，默认 1（无头）；本地调试可设 0 看浏览器。
 #
@@ -52,6 +59,11 @@ from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 from playwright.sync_api import sync_playwright
+
+try:
+    import pyotp  # 2FA 验证码现算用；没装时有 2FA 的账号会记 needs_second_factor
+except ImportError:
+    pyotp = None
 
 logging.basicConfig(
     level=logging.INFO,
@@ -184,7 +196,70 @@ def click_button_by_text(page, pattern, timeout=5000):
         return False
 
 
-def zitadel_login(page, email, password, home_netloc):
+def wait_for_login_state(page, timeout=30):
+    """等 SPA 的鉴权跳转稳定再判断：登录页/SSO 按钮 → 'login'，
+    侧栏出现 My Domains → 'dashboard'（已登录），超时 → 'unknown'。
+    2026-11-20 的教训：goto 刚返回时 SPA 还没跳完，URL 还是 /dashboard
+    且没有 SSO 按钮，直接判断会误以为已登录，随后 goto /my-domains
+    被站内的跳转打断。"""
+    sso = page.get_by_role("button", name=re.compile(r"Continue with Stackryze SSO", re.I))
+    domains_link = page.get_by_role("link", name=re.compile(r"My Domains", re.I))
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if "/login" in page.url:
+            return "login"
+        try:
+            if sso.count() > 0:
+                return "login"
+        except Exception:
+            pass
+        try:
+            if domains_link.count() > 0:
+                return "dashboard"
+        except Exception:
+            pass
+        time.sleep(1)
+    return "unknown"
+
+
+def goto_with_retry(page, url, timeout=60000):
+    """goto 被站内另一次跳转打断时（SPA 登录后常有），等 3 秒再试一次。"""
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=timeout)
+    except Exception as e:
+        if "interrupted by another navigation" in str(e):
+            logger.warning(f"goto {url} 被站内跳转打断，3 秒后重试。")
+            time.sleep(3)
+            page.goto(url, wait_until="domcontentloaded", timeout=timeout)
+        else:
+            raise
+
+
+def fill_totp_code(page, code):
+    """把 6 位验证码填进二步验证页：单个输入框、6 个单字框都支持。"""
+    single = first_visible(page, 'input[autocomplete="one-time-code"]', timeout=3000)
+    if single:
+        single.fill(code)
+        return True
+    boxes = page.locator('input[maxlength="1"]')
+    try:
+        n = boxes.count()
+    except Exception:
+        n = 0
+    if n >= 6:
+        for i, ch in enumerate(code[:n]):
+            boxes.nth(i).fill(ch)
+        return True
+    generic = first_visible(
+        page, 'input[type="text"], input[inputmode="numeric"]', timeout=3000
+    )
+    if generic:
+        generic.fill(code)
+        return True
+    return False
+
+
+def zitadel_login(page, email, password, home_netloc, totp_secret=None):
     """在 Zitadel 登录页完成邮箱+密码登录，直到跳回本站 dashboard。"""
     # 第一步：等登录页出现任一输入框（登录名或密码）。
     deadline = time.time() + 30
@@ -241,27 +316,49 @@ def zitadel_login(page, email, password, home_netloc):
         password_field.press("Enter")
 
     # 第四步：等跳回本站（dashboard 或 my-domains），同时盯着报错和第二因素。
+    # 有 TOTP 种子时，二步验证页出现就现算验证码填进去（最多试 2 次，
+    # 错了 Zitadel 会留在验证页并提示，可再试一次）；没种子则直接记
+    # needs_second_factor，不死等。
     deadline = time.time() + 90
+    totp_attempts = 0
+    twofa_patterns = [
+        "second factor", "two-factor", "two factor", "authenticator",
+        "verification code", "enter the code", "one-time code", "one time code",
+    ]
     while time.time() < deadline:
         url = page.url
         if urlparse(url).netloc == home_netloc and (
             "/dashboard" in url or "/my-domains" in url or "/overview" in url
         ):
             return True
+        code_field = first_visible(
+            page, 'input[autocomplete="one-time-code"], input[maxlength="1"]', timeout=1000
+        )
+        twofa_text = page_text_contains(page, twofa_patterns)
+        if (code_field or twofa_text) and totp_secret and pyotp and totp_attempts < 2:
+            totp_attempts += 1
+            code = pyotp.TOTP(totp_secret).now()
+            logger.info("检测到二步验证，用 TOTP 种子现算验证码填入。")
+            if fill_totp_code(page, code):
+                if not click_button_by_text(
+                    page, r"continue|verify|sign in|confirm", timeout=5000
+                ):
+                    page.keyboard.press("Enter")
+                deadline = time.time() + 60
+                time.sleep(2)
+                continue
+        if code_field or twofa_text:
+            raise AccountError(
+                "needs_second_factor",
+                "Zitadel 要求第二因素验证码，脚本无法自动过："
+                "请给这个账号配 STACKRYZE_TOTP_N（验证器种子，放 Secrets 里），"
+                "或先在账号里关掉第二因素再跑",
+            )
         hit = page_text_contains(
             page, ["incorrect", "invalid password", "wrong password", "locked", "too many attempts"]
         )
         if hit:
             raise AccountError("login_failed", f"登录被拒（页面提示含“{hit}”，邮箱或密码不对）")
-        if page_text_contains(
-            page,
-            ["second factor", "authenticator", "verification code", "enter the code",
-             "one-time code", "one time code"],
-        ):
-            raise AccountError(
-                "needs_second_factor",
-                "Zitadel 要求第二因素（验证码/验证器），脚本无法自动过，请先在账号里关掉第二因素再跑",
-            )
         time.sleep(2)
     raise AccountError(
         "login_failed",
@@ -327,7 +424,7 @@ def api_renew(page, api_base, csrf, domain_id):
     return result["status"], result["body"]
 
 
-def process_account(browser, email, password, index, probe=False):
+def process_account(browser, email, password, index, totp_secret=None, probe=False):
     """处理单个账号：登录 → 拿列表 → 续 60 天内的域名。返回结构化 dict。"""
     account_label = f"{index}. {mask_email(email)}"
     logger.info(f"开始处理账号：{account_label}")
@@ -340,6 +437,20 @@ def process_account(browser, email, password, index, probe=False):
             "error": f"未配置对应的 STACKRYZE_PASSWORD_{index}",
             "domains": [],
         }
+
+    # TOTP 种子先验一次格式：错了直接报出来，别等进了二步验证页才崩。
+    if totp_secret and pyotp:
+        try:
+            pyotp.TOTP(totp_secret).now()
+        except Exception:
+            return {
+                "index": index,
+                "email": mask_email(email),
+                "status": "error",
+                "error": f"STACKRYZE_TOTP_{index} 种子格式不对（应为验证器给的 Base32 种子），"
+                         "请检查 Secrets 里是不是多粘了空格或缺了字符",
+                "domains": [],
+            }
 
     home = urlparse(DASHBOARD_URL)
     home_netloc = home.netloc
@@ -364,19 +475,26 @@ def process_account(browser, email, password, index, probe=False):
 
     page.on("response", on_response)
     try:
-        page.goto(DASHBOARD_URL, wait_until="domcontentloaded", timeout=60000)
+        goto_with_retry(page, DASHBOARD_URL)
         if not wait_for_cf(page):
             raise AccountError(
                 "cf_challenge",
                 "Cloudflare 质询 120 秒没过去（真浏览器也没通过），本次无法登录",
             )
 
-        # 已登录直接在 dashboard；否则在登录页点 SSO。
-        sso = page.get_by_role(
-            "button", name=re.compile(r"Continue with Stackryze SSO", re.I)
-        )
-        if "/login" in page.url or sso.count() > 0:
+        # 先等 SPA 的鉴权跳转稳定，再判断是登录页还是已登录的仪表盘。
+        state = wait_for_login_state(page)
+        if state == "unknown":
+            raise AccountError(
+                "login_failed",
+                "打开 dashboard 后 30 秒没出现登录按钮也没出现仪表盘菜单，"
+                "页面可能卡住了或结构变了",
+            )
+        if state == "login":
             logger.info(f"账号 {account_label} 未登录，点 SSO 去 Zitadel 登录。")
+            sso = page.get_by_role(
+                "button", name=re.compile(r"Continue with Stackryze SSO", re.I)
+            )
             sso.first.click(timeout=15000)
             # 等离开登录页：跳到 Zitadel，或直接回到 dashboard。
             deadline = time.time() + 60
@@ -392,13 +510,13 @@ def process_account(browser, email, password, index, probe=False):
                     break
                 time.sleep(1)
             if "/dashboard" not in page.url and "/my-domains" not in page.url:
-                zitadel_login(page, email, password, home_netloc)
+                zitadel_login(page, email, password, home_netloc, totp_secret)
                 if not wait_for_cf(page):
                     raise AccountError("cf_challenge", "登录后 Cloudflare 质询 120 秒没过去")
             logger.info(f"账号 {account_label} 登录成功。")
 
         # 进 My Domains，强制拉一次域名列表，顺便抓到后端接口地址。
-        page.goto(origin + "/my-domains", wait_until="domcontentloaded", timeout=60000)
+        goto_with_retry(page, origin + "/my-domains")
         if not wait_for_cf(page):
             raise AccountError("cf_challenge", "进 My Domains 时 Cloudflare 质询 120 秒没过去")
         deadline = time.time() + 30
@@ -538,10 +656,14 @@ def main():
             )
             try:
                 for idx, email in enumerate(EMAILS, 1):
-                    # 密码只从环境变量读进内存，绝不打印。
+                    # 密码和 TOTP 种子只从环境变量读进内存，绝不打印。
                     password = os.getenv(f"STACKRYZE_PASSWORD_{idx}", "")
+                    totp_secret = os.getenv(f"STACKRYZE_TOTP_{idx}", "")
                     accounts.append(
-                        process_account(browser, email, password, idx, probe=args.probe)
+                        process_account(
+                            browser, email, password, idx,
+                            totp_secret=totp_secret, probe=args.probe,
+                        )
                     )
                     if args.probe:
                         break
