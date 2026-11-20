@@ -7,27 +7,21 @@
 # 通常晚几分钟到几十分钟属于正常；只在仓库默认分支上跑。
 #
 # 仓库 Secrets（Settings → Secrets and variables → Actions → New repository secret），
-# 千万不要把 cookie 写进代码或聊天记录里：
-#   STACKRYZE_API_URL - 后端 origin。取法：已登录的浏览器打开
-#     https://domain.stackryze.com/dashboard ，F12 → Network → 刷新，
-#     找到 /subdomains 那条请求，复制 Request URL 的 origin 部分。
-#   STACKRYZE_EMAILS  - 3 个账号邮箱，逗号分隔，与 cookie 按序号一一对应，
-#     例：56959566@qq.com,adjlevis@qq.com,djbadboy.vip@gmail.com
-#   STACKRYZE_COOKIE_1 / _2 / _3 - 每个账号导出的完整 Cookie 字符串。
-#     导出方法（每个账号单独做一遍，账号之间不要串）：
-#       1. 用那个账号登录 https://domain.stackryze.com/dashboard，
-#          等 Cloudflare 验证通过、能看到域名列表。
-#       2. 装 Cookie-Editor 这类扩展（或用浏览器自带的导出），
-#          在 API 那个 origin 下（不是 domain.stackryze.com 首页）
-#          导出全部 cookie，整串原样粘贴成一个 Secret。
-#          必须包含 cf_clearance（过 CF 质询用）和 freedomains.csrf
-#          （续期 CSRF 用），缺了前者会 403 Just a moment，缺了后者
-#          续期会被后端拒绝；会话 cookie 的名字不用管，整串都带上就行。
-#       3. 会话过期（401）或 CF 质询过期（403）时，通知里会单独说明，
-#          在浏览器里重新登录一次再导出替换对应的 Secret 即可。
+# 千万不要把密码写进代码或聊天记录里，只放 Secrets：
+#   STACKRYZE_EMAILS     - 3 个账号邮箱，逗号分隔，
+#     例：5695956633@qq.com,adjlevis33@qq.com,djbadboy.vip44@gmail.com
+#   STACKRYZE_PASSWORD_1 / _2 / _3
+#     - 与邮箱按序号一一对应的 Zitadel 登录密码（在 Zitadel 登录页输的那个）。
+#     再加账号就按序号往下加 _4、_5……：仓库里加同名 Secret，
+#     工作流 env 里已预留了 _4、_5 两行，STACKRYZE_EMAILS 后面逗号加邮箱就行。
+#     旧的 STACKRYZE_API_URL / STACKRYZE_COOKIE_1/2/3 不再用了，可以删掉。
 #   TG_BOT_TOKEN / TG_CHAT_ID - Telegram 通知（跟 DigitalPlat 那个仓库同一套）。
 #   WECHAT_API_URL / WECHAT_AUTH_TOKEN - 微信通知，自建 wxsend 接口，
 #     例：https://wx.djcf.pp.ua/wxsend（跟 CF 三网优选那个仓库同一套）。
+#
+# 注意：脚本用真浏览器登录，会自己过 Cloudflare 质询；如果哪个账号
+# 开了第二因素（验证码/验证器）或只剩通行密钥登录，那次运行会把这个
+# 账号记为 needs_second_factor 并继续下一个，不会死等。
 #
 # 通知规则（跟 DigitalPlat / CF 三网优选一致，脚本只写 JSON，样式全在这里）：
 #   - 一次运行只发一条消息；TG 用 HTML、微信用纯文本，内容相同。
@@ -57,13 +51,15 @@ jobs:
 
       - name: 检查并续期域名
         env:
-          STACKRYZE_API_URL: ${{ secrets.STACKRYZE_API_URL }}
           STACKRYZE_EMAILS: ${{ secrets.STACKRYZE_EMAILS }}
-          STACKRYZE_COOKIE_1: ${{ secrets.STACKRYZE_COOKIE_1 }}
-          STACKRYZE_COOKIE_2: ${{ secrets.STACKRYZE_COOKIE_2 }}
-          STACKRYZE_COOKIE_3: ${{ secrets.STACKRYZE_COOKIE_3 }}
+          STACKRYZE_PASSWORD_1: ${{ secrets.STACKRYZE_PASSWORD_1 }}
+          STACKRYZE_PASSWORD_2: ${{ secrets.STACKRYZE_PASSWORD_2 }}
+          STACKRYZE_PASSWORD_3: ${{ secrets.STACKRYZE_PASSWORD_3 }}
+          STACKRYZE_PASSWORD_4: ${{ secrets.STACKRYZE_PASSWORD_4 }}
+          STACKRYZE_PASSWORD_5: ${{ secrets.STACKRYZE_PASSWORD_5 }}
         run: |
-          pip install -q requests
+          pip install -q playwright
+          playwright install --with-deps chromium
           python3 renew.py
 
       - name: Send notification
@@ -109,7 +105,7 @@ jobs:
               for d in acc.get("domains", []):
                   if d.get("result") in ("renewed", "failed", "expired"):
                       lines.append(f"  {d.get('name')}（{d.get('expiry')}，剩 {d.get('remaining_days')} 天）：{d.get('detail')}")
-              if acc.get("status") in ("cf_challenge", "session_expired", "no_cookie", "error"):
+              if acc.get("status") in ("cf_challenge", "login_failed", "needs_second_factor", "no_password_login", "no_password", "api_error", "error"):
                   lines.append(f"  原因：{acc.get('error')}")
           if result.get("error") and not result.get("accounts"):
               lines.append(result["error"])
