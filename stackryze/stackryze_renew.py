@@ -98,6 +98,11 @@ EMAILS = [e.strip() for e in EMAILS_RAW.split(",") if e.strip()]
 
 HEADLESS = os.getenv("STACKRYZE_HEADLESS", "1") != "0"
 
+# 调试开关：STACKRYZE_DEBUG_CF=1 时，质询过不去就把页面当时的样子
+# （URL、标题、iframe 列表、正文摘要 + 截图 + HTML）打出来并存文件。
+# 仅用于查 CF 到底给了什么页面，找到问题后删掉，平时保持关闭。
+CF_DEBUG = os.getenv("STACKRYZE_DEBUG_CF", "0") == "1"
+
 # 结构化结果的输出路径，工作流的通知步骤会读这个文件。
 RESULT_PATH = os.getenv("RENEW_RESULT_PATH", "stackryze_result.json")
 
@@ -172,6 +177,34 @@ def page_text_contains(page, patterns):
     return None
 
 
+def dump_cf_state(page, tag):
+    """调试用：把质询页当时的 URL、标题、iframe 列表、正文摘要打到日志，
+    再存一张截图 + 一份 HTML。找到问题后删掉（STACKRYZE_DEBUG_CF=1 才开）。"""
+    if not CF_DEBUG:
+        return
+    try:
+        logger.info(f"[CF-DEBUG {tag}] url={page.url} title={page.title()!r}")
+    except Exception as e:
+        logger.info(f"[CF-DEBUG {tag}] 读 url/title 失败：{e}")
+    try:
+        srcs = page.locator("iframe").evaluate_all("els => els.map(e => e.src)")
+        logger.info(f"[CF-DEBUG {tag}] iframes({len(srcs)}): {srcs}")
+    except Exception as e:
+        logger.info(f"[CF-DEBUG {tag}] 读 iframe 失败：{e}")
+    try:
+        text = page.locator("body").inner_text(timeout=3000)
+        logger.info(f"[CF-DEBUG {tag}] body: {text[:1000]!r}")
+    except Exception as e:
+        logger.info(f"[CF-DEBUG {tag}] 读 body 失败：{e}")
+    try:
+        page.screenshot(path=f"cf_debug_{tag}.png")
+        with open(f"cf_debug_{tag}.html", "w", encoding="utf-8") as f:
+            f.write(page.content())
+        logger.info(f"[CF-DEBUG {tag}] 截图和 HTML 已存 cf_debug_{tag}.png/.html")
+    except Exception as e:
+        logger.info(f"[CF-DEBUG {tag}] 存截图/HTML 失败：{e}")
+
+
 def click_turnstile_checkbox(page):
     """点 CF Turnstile 的“我是人类”勾选框（在 challenges.cloudflare.com
     的 iframe 里）。用户 2026-11-20 确认：这站的盾要点勾才能过，不是
@@ -207,6 +240,7 @@ def wait_for_cf(page, timeout=CF_WAIT_SECONDS, retries=1):
     “验证”按钮（用户 2026-11-20 确认：勾完要点验证才能过）；两步
     都做了还不过，超时后刷新一次再等，仍不过返回 False。"""
     for attempt in range(retries + 1):
+        dump_cf_state(page, f"attempt{attempt}")
         deadline = time.time() + timeout
         clicked = False
         while time.time() < deadline:
@@ -222,6 +256,7 @@ def wait_for_cf(page, timeout=CF_WAIT_SECONDS, retries=1):
                 # 勾完出现的“验证”按钮，点了才放行；没有就跳过。
                 click_button_by_text(page, r"verify|验证", timeout=2000)
             time.sleep(2)
+        dump_cf_state(page, f"attempt{attempt}-timeout")
         if attempt < retries:
             logger.warning("Cloudflare 质询没过去，刷新页面再等一次。")
             try:
