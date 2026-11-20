@@ -19,6 +19,13 @@
 #     - 与邮箱按序号一一对应的 Zitadel 登录密码（在 Zitadel 登录页输的那个）。
 #     再加账号就按序号往下加 _4、_5……：仓库里加同名 Secret，
 #     工作流 env 里已预留了 _4、_5 两行，STACKRYZE_EMAILS 后面逗号加邮箱就行。
+#   STACKRYZE_TOTP_1 / _2 / _3（有 2FA 的账号必填，站里强制开了二步验证）
+#     - 每个账号的验证器种子（TOTP secret），脚本用它现算 6 位验证码
+#       自动填进二步验证页。种子只放 Secrets，绝不发聊天。
+#     怎么拿到种子：在 Zitadel（auth.stackryze.com）账号设置里找到
+#       二步验证/验证器，重新设置一次会显示新的二维码和种子；
+#       当初设置时保存过二维码或种子文本的，直接用那个。
+#     同样按序号往下加 _4、_5……，工作流 env 里已预留。
 #     旧的 STACKRYZE_API_URL / STACKRYZE_COOKIE_1/2/3 不再用了，可以删掉。
 #   TG_BOT_TOKEN / TG_CHAT_ID - Telegram 通知（跟 DigitalPlat 那个仓库同一套）。
 #   WX_PUSH_URL / WX_PUSH_TOKEN - 微信通知，自建 wxsend 接口
@@ -63,8 +70,13 @@ jobs:
           STACKRYZE_PASSWORD_3: ${{ secrets.STACKRYZE_PASSWORD_3 }}
           STACKRYZE_PASSWORD_4: ${{ secrets.STACKRYZE_PASSWORD_4 }}
           STACKRYZE_PASSWORD_5: ${{ secrets.STACKRYZE_PASSWORD_5 }}
+          STACKRYZE_TOTP_1: ${{ secrets.STACKRYZE_TOTP_1 }}
+          STACKRYZE_TOTP_2: ${{ secrets.STACKRYZE_TOTP_2 }}
+          STACKRYZE_TOTP_3: ${{ secrets.STACKRYZE_TOTP_3 }}
+          STACKRYZE_TOTP_4: ${{ secrets.STACKRYZE_TOTP_4 }}
+          STACKRYZE_TOTP_5: ${{ secrets.STACKRYZE_TOTP_5 }}
         run: |
-          pip install -q playwright
+          pip install -q playwright pyotp
           playwright install --with-deps chromium
           python3 stackryze/stackryze_renew.py
 
