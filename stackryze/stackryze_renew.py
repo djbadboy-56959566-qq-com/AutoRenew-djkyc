@@ -200,11 +200,16 @@ class HttpClient:
         """发一次请求，不跟跳转。返回 (status, headers, body_bytes)。
         3xx 也正常返回，不抛错；4xx/5xx 也一样，调用方按状态码判断。
         网络层出问题（连接被断、响应被截断、超时）会自动重试几次；
-        续期 POST 不重试（重试可能把已成功的一次再算成失败）。"""
+        5xx（500/502/503/504）是服务端一时出问题，也会等一会儿再试
+        ——2026-11-22 Zitadel 就偶尔返回 500，不重试整个账号就白跑了；
+        续期 POST 不重试（retries=0：响应丢了也可能是服务端已续成功，
+        重试会把成功算成失败）。"""
         last_exc = None
         for attempt in range(retries + 1):
             try:
-                return self._request_once(method, url, body, headers, timeout)
+                status, resp_headers, body_bytes = self._request_once(
+                    method, url, body, headers, timeout
+                )
             except (urllib.error.URLError, http.client.HTTPException, TimeoutError, OSError) as e:
                 last_exc = e
                 if attempt < retries:
@@ -213,9 +218,22 @@ class HttpClient:
                         f"第 {attempt + 1}/{retries + 1} 次，稍后重试。"
                     )
                     time.sleep(1 + attempt)
+                    continue
+                raise AccountError(
+                    "api_error",
+                    f"请求 {url} 网络失败（已重试 {retries + 1} 次）：{last_exc}",
+                )
+            if status in (500, 502, 503, 504) and attempt < retries:
+                logger.warning(
+                    f"请求 {url} 返回 {status}，服务端可能一时出问题，"
+                    f"第 {attempt + 1}/{retries + 1} 次，稍后重试。"
+                )
+                time.sleep(2 + attempt * 2)
+                continue
+            return status, resp_headers, body_bytes
         raise AccountError(
             "api_error",
-            f"请求 {url} 网络失败（已重试 {retries + 1} 次）：{last_exc}",
+            f"请求 {url} 多次返回 5xx（已重试 {retries + 1} 次），服务端一直没恢复",
         )
 
     def _request_once(self, method, url, body=None, headers=None, timeout=REQUEST_TIMEOUT):
@@ -314,10 +332,10 @@ def zitadel_login(client, email, password, totp_secret=None):
     # 第 2 步：authorize → 307 到登录页，取 authRequestId。
     status, headers, _ = client.get(authorize_url)
     if status not in (301, 302, 303, 307, 308):
+        hint = "Zitadel 那边一时出问题，稍后重跑试试" if status >= 500 else "授权请求可能被拒了"
         raise AccountError(
             "login_failed",
-            f"Zitadel authorize 没跳去登录页（状态 {status}），"
-            "授权请求可能被拒了",
+            f"Zitadel authorize 没跳去登录页（状态 {status}），{hint}",
         )
     login_url = urllib.parse.urljoin(authorize_url, headers.get("Location", ""))
     # 登录页本身还会 307 到 /en/login，手动跟到 200 为止。
