@@ -80,7 +80,9 @@ jobs:
               if r == "CLAIMED":
                   line = "✅ %s(%s) 签到成功: +%s 积分" % (label, uid, gained)
               elif r == "ALREADY":
-                  line = "✅ %s(%s) 今日已签: +%s 积分" % (label, uid, gained)
+                  # 已签状态下接口可能不返回今日积分，为 0 时不显示"+0 积分"
+                  line = "✅ %s(%s) 今日已签%s" % (label, uid,
+                      (": +%s 积分" % gained) if gained else "")
               elif r == "INACTIVE":
                   line = "⚠️ %s(%s) 签到活动未开启" % (label, uid)
               elif r in ("NETWORK", "TIMEOUT"):
