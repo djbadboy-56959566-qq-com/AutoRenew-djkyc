@@ -52,7 +52,7 @@ jobs:
       - name: 汇总通知文本
         if: always()
         run: |
-          python - "$RUNNER_TEMP" <<'PYEOF' > "$RUNNER_TEMP/message.txt" || true
+          python - "$RUNNER_TEMP" <<'PYEOF' || true
           import html, json, os, sys
 
           temp = sys.argv[1]
@@ -106,7 +106,13 @@ jobs:
           for a in accounts:
               lines.append(fmt(a["label"], a["uid"],
                                load_result(os.path.join(temp, a["file"]))))
-          print("\n".join(lines))
+          html_text = "\n".join(lines)
+          # 微信通道是纯文本：把 <a> 标签剥掉，只留"请点击"字样
+          import re
+          plain_text = re.sub(r'<a href="[^"]*">([^<]*)</a>', r'\1', html_text)
+          open(os.path.join(temp, "message.txt"), "w", encoding="utf-8").write(html_text)
+          open(os.path.join(temp, "message_plain.txt"), "w", encoding="utf-8").write(plain_text)
+          print(html_text)
           PYEOF
           echo "===== 通知内容 ====="
           cat "$RUNNER_TEMP/message.txt"
@@ -134,25 +140,27 @@ jobs:
             && echo "Telegram 推送成功" \
             || echo "Telegram 推送失败（检查 TG_BOT_TOKEN / TG_CHAT_ID）"
 
-      - name: 推送自建微信接口
+      - name: 推送自建微信接口（wxsend）
         if: always()
         env:
-          WECHAT_API_URL: ${{ secrets.WECHAT_API_URL }}
-          WECHAT_AUTH_TOKEN: ${{ secrets.WECHAT_AUTH_TOKEN }}
+          WX_PUSH_URL: ${{ secrets.WX_PUSH_URL }}
+          WX_PUSH_TOKEN: ${{ secrets.WX_PUSH_TOKEN }}
         run: |
-          MSG=$(cat "$RUNNER_TEMP/message.txt")
-          if [ -z "$WECHAT_API_URL" ]; then
-            echo "WECHAT_API_URL 未配置，跳过微信通知"
+          MSG=$(cat "$RUNNER_TEMP/message_plain.txt")
+          if [ -z "$WX_PUSH_URL" ] || [ -z "$WX_PUSH_TOKEN" ]; then
+            echo "WX_PUSH_URL / WX_PUSH_TOKEN 未配置，跳过微信通知"
             exit 0
           fi
-          # 自建接口默认按 JSON 推送：{"title": "...", "content": "..."}，
-          # 认证用 Authorization: Bearer <token> 头。如果你的接口字段名或
-          # 认证方式不同（如 ?token= 查询参数、form 表单），改这一步即可。
+          # 对齐仓库里其他工作流的 wxsend 格式：
+          #   JSON 体 {"token", "title", "content"} + Authorization: Bearer 头
+          #   + 浏览器 UA（wx.djcf.pp.ua 前面有 CF，Python/curl 默认 UA 会被拦）
           BODY=$(jq -n --arg title "WorkBuddy 每日签到" --arg content "$MSG" \
-            '{title: $title, content: $content}')
+            --arg token "$WX_PUSH_TOKEN" \
+            '{token: $token, title: $title, content: $content}')
           HTTP_CODE=$(curl -sS --max-time 20 -o "$RUNNER_TEMP/wx-reply.json" -w '%{http_code}' \
-            -X POST "$WECHAT_API_URL" \
+            -X POST "$WX_PUSH_URL" \
             -H "Content-Type: application/json" \
-            -H "Authorization: Bearer ${WECHAT_AUTH_TOKEN}" \
+            -H "Authorization: Bearer ${WX_PUSH_TOKEN}" \
+            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36" \
             -d "$BODY")
           echo "HTTP $HTTP_CODE，返回：$(cat "$RUNNER_TEMP/wx-reply.json")"
