@@ -10,6 +10,16 @@ on:
 permissions:
   contents: read
 
+env:
+  # 通知卡片里的账号清单：(显示名, 结果文件, uid 缩写)。增删账号改这里。
+  WB_ACCOUNTS_JSON: |
+    [
+      {"label": "adjlevis",  "file": "result-adjlevis.json", "uid": "da80654a…"},
+      {"label": "56959566",  "file": "result-56959566.json", "uid": "f03a5ab6…"}
+    ]
+  # 通知卡片顶部的平台链接
+  WB_PLATFORM_URL: https://copilot.tencent.com
+
 jobs:
   checkin:
     runs-on: ubuntu-latest
@@ -26,11 +36,116 @@ jobs:
           WB_CREDS: ${{ secrets.WB_CREDS_ADJLEVIS }}
         run: |
           printf '%s' "$WB_CREDS" > "$RUNNER_TEMP/creds.json"
-          WORKBUDDY_AUTH_FILE="$RUNNER_TEMP/creds.json" python signin.py auto || true
+          WORKBUDDY_AUTH_FILE="$RUNNER_TEMP/creds.json" python workbuddy/workbuddy.py auto \
+            | tee "$RUNNER_TEMP/result-adjlevis.json" || true
 
       - name: 签到 56959566
         env:
           WB_CREDS: ${{ secrets.WB_CREDS_56959566 }}
         run: |
           printf '%s' "$WB_CREDS" > "$RUNNER_TEMP/creds.json"
-          WORKBUDDY_AUTH_FILE="$RUNNER_TEMP/creds.json" python signin.py auto || true
+          WORKBUDDY_AUTH_FILE="$RUNNER_TEMP/creds.json" python workbuddy/workbuddy.py auto \
+            | tee "$RUNNER_TEMP/result-56959566.json" || true
+
+      # ===== 以下三步都是纯内联逻辑，改通知样式只动这里 =====
+
+      - name: 汇总通知文本
+        if: always()
+        run: |
+          python - "$RUNNER_TEMP" <<'PYEOF' > "$RUNNER_TEMP/message.txt" || true
+          import json, os, sys
+
+          temp = sys.argv[1]
+          accounts = json.loads(os.environ["WB_ACCOUNTS_JSON"])
+          platform = os.environ["WB_PLATFORM_URL"]
+
+          def load_result(path):
+              try:
+                  raw = open(path, encoding="utf-8").read().strip()
+                  if not raw:
+                      return {"result": "EMPTY", "report": "(步骤无输出)"}
+                  try:
+                      return json.loads(raw)
+                  except ValueError:
+                      return {"result": "UNKNOWN", "report": raw[:200]}
+              except FileNotFoundError:
+                  return {"result": "MISSING", "report": "(该步骤未运行)"}
+
+          def fmt(label, uid, d):
+              r = d.get("result")
+              gained = d.get("credits_gained")
+              if gained is None:
+                  gained = d.get("credit") or d.get("today_credit") or 0
+              total = d.get("total_credits")
+              if r == "CLAIMED":
+                  line = "✅ %s(%s) 签到成功: +%s 积分" % (label, uid, gained)
+              elif r == "ALREADY":
+                  line = "✅ %s(%s) 今日已签: +%s 积分" % (label, uid, gained)
+              elif r == "INACTIVE":
+                  line = "⚠️ %s(%s) 签到活动未开启" % (label, uid)
+              elif r in ("NETWORK", "TIMEOUT"):
+                  line = "⚠️ %s(%s) 网络超时，下次自动重试" % (label, uid)
+              else:
+                  line = "❌ %s(%s) 签到异常: %s" % (label, uid, str(d.get("report") or r)[:80])
+              if total is not None and r in ("CLAIMED", "ALREADY"):
+                  line += "，累计 %s" % total
+              if d.get("needs_attention"):
+                  line += "（需处理）"
+              return line
+
+          lines = ["📋 WorkBuddy 每日签到", "🔗 平台：%s" % platform]
+          repo = "/".join(filter(None, (os.environ.get("GITHUB_SERVER_URL"),
+                                        os.environ.get("GITHUB_REPOSITORY"))))
+          lines.append("📂 仓库：%s" % (repo or "（本地测试）"))
+          lines.append("")
+          for a in accounts:
+              lines.append(fmt(a["label"], a["uid"],
+                               load_result(os.path.join(temp, a["file"]))))
+          print("\n".join(lines))
+          PYEOF
+          echo "===== 通知内容 ====="
+          cat "$RUNNER_TEMP/message.txt"
+
+      - name: 推送 Telegram
+        if: always()
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        run: |
+          MSG=$(cat "$RUNNER_TEMP/message.txt")
+          if [ -z "$TG_BOT_TOKEN" ] || [ -z "$TG_CHAT_ID" ]; then
+            echo "TG_BOT_TOKEN / TG_CHAT_ID 未配置，跳过 Telegram 通知"
+            exit 0
+          fi
+          curl -sS --max-time 20 \
+            -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TG_CHAT_ID}" \
+            --data-urlencode "text=${MSG}" \
+            | tee "$RUNNER_TEMP/tg-reply.json"
+          # Telegram 返回 {"ok":true,...} 视为成功
+          grep -q '"ok":true' "$RUNNER_TEMP/tg-reply.json" \
+            && echo "Telegram 推送成功" \
+            || echo "Telegram 推送失败（检查 TG_BOT_TOKEN / TG_CHAT_ID）"
+
+      - name: 推送自建微信接口
+        if: always()
+        env:
+          WECHAT_API_URL: ${{ secrets.WECHAT_API_URL }}
+          WECHAT_AUTH_TOKEN: ${{ secrets.WECHAT_AUTH_TOKEN }}
+        run: |
+          MSG=$(cat "$RUNNER_TEMP/message.txt")
+          if [ -z "$WECHAT_API_URL" ]; then
+            echo "WECHAT_API_URL 未配置，跳过微信通知"
+            exit 0
+          fi
+          # 自建接口默认按 JSON 推送：{"title": "...", "content": "..."}，
+          # 认证用 Authorization: Bearer <token> 头。如果你的接口字段名或
+          # 认证方式不同（如 ?token= 查询参数、form 表单），改这一步即可。
+          BODY=$(jq -n --arg title "WorkBuddy 每日签到" --arg content "$MSG" \
+            '{title: $title, content: $content}')
+          HTTP_CODE=$(curl -sS --max-time 20 -o "$RUNNER_TEMP/wx-reply.json" -w '%{http_code}' \
+            -X POST "$WECHAT_API_URL" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer ${WECHAT_AUTH_TOKEN}" \
+            -d "$BODY")
+          echo "HTTP $HTTP_CODE，返回：$(cat "$RUNNER_TEMP/wx-reply.json")"
