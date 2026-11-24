@@ -1,0 +1,36 @@
+name: WorkBuddy daily checkin
+
+on:
+  schedule:
+    # GitHub Actions 的 cron 用 UTC 时间；北京时间 = UTC + 8
+    - cron: '5 16 * * *'    # 北京时间每天 00:05
+    - cron: '35 20 * * *'   # 北京时间 04:35 补签（防 GitHub cron 延迟或跳过，接口幂等不会重复计分）
+  workflow_dispatch: {}     # 支持手动触发，方便首次验证
+
+permissions:
+  contents: read
+
+jobs:
+  checkin:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: 签到 adjlevis
+        env:
+          WB_CREDS: ${{ secrets.WB_CREDS_ADJLEVIS }}
+        run: |
+          printf '%s' "$WB_CREDS" > "$RUNNER_TEMP/creds.json"
+          WORKBUDDY_AUTH_FILE="$RUNNER_TEMP/creds.json" python signin.py auto || true
+
+      - name: 签到 56959566
+        env:
+          WB_CREDS: ${{ secrets.WB_CREDS_56959566 }}
+        run: |
+          printf '%s' "$WB_CREDS" > "$RUNNER_TEMP/creds.json"
+          WORKBUDDY_AUTH_FILE="$RUNNER_TEMP/creds.json" python signin.py auto || true
