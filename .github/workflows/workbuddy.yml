@@ -53,7 +53,7 @@ jobs:
         if: always()
         run: |
           python - "$RUNNER_TEMP" <<'PYEOF' > "$RUNNER_TEMP/message.txt" || true
-          import json, os, sys
+          import html, json, os, sys
 
           temp = sys.argv[1]
           accounts = json.loads(os.environ["WB_ACCOUNTS_JSON"])
@@ -91,12 +91,15 @@ jobs:
                   line += "，累计 %s" % total
               if d.get("needs_attention"):
                   line += "（需处理）"
-              return line
+              return html.escape(line)
 
-          lines = ["📋 WorkBuddy 每日签到", "🔗 平台：%s" % platform]
+          # 平台/仓库只显示"请点击"，真实地址藏在 HTML 超链接里
+          lines = ["📋 WorkBuddy 每日签到",
+                   "🔗 平台：<a href=\"%s\">请点击</a>" % html.escape(platform)]
           repo = "/".join(filter(None, (os.environ.get("GITHUB_SERVER_URL"),
                                         os.environ.get("GITHUB_REPOSITORY"))))
-          lines.append("📂 仓库：%s" % (repo or "（本地测试）"))
+          if repo:
+              lines.append("📂 仓库：<a href=\"%s\">请点击</a>" % html.escape(repo))
           lines.append("")
           for a in accounts:
               lines.append(fmt(a["label"], a["uid"],
@@ -120,6 +123,8 @@ jobs:
           curl -sS --max-time 20 \
             -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
             --data-urlencode "chat_id=${TG_CHAT_ID}" \
+            --data-urlencode "parse_mode=HTML" \
+            --data-urlencode "disable_web_page_preview=true" \
             --data-urlencode "text=${MSG}" \
             | tee "$RUNNER_TEMP/tg-reply.json"
           # Telegram 返回 {"ok":true,...} 视为成功
